@@ -54,6 +54,10 @@ Docker image management
 {{ include "hf.common.images.image" (dict "imageRoot" .Values.images.services.search "global" .Values.global.huggingface) }}
 {{- end -}}
 
+{{- define "services.sseApi.image" -}}
+{{ include "hf.common.images.image" (dict "imageRoot" .Values.images.services.sseApi "global" .Values.global.huggingface) }}
+{{- end -}}
+
 {{- define "services.storageAdmin.image" -}}
 {{ include "hf.common.images.image" (dict "imageRoot" .Values.images.services.storageAdmin "global" .Values.global.huggingface) }}
 {{- end -}}
@@ -105,9 +109,29 @@ app.kubernetes.io/component: "{{ include "name" . }}-cache-metrics-collector"
 app.kubernetes.io/component: "{{ include "name" . }}-backfill"
 {{- end -}}
 
-{{- define "labels.deleteIndexes" -}}
+{{- define "labels.cleanDuckdbIndexDownloads" -}}
 {{ include "hf.labels.commons" . }}
-app.kubernetes.io/component: "{{ include "name" . }}-delete-indexes"
+app.kubernetes.io/component: "{{ include "name" . }}-clean-duckdb-downloads"
+{{- end -}}
+
+{{- define "labels.cleanDuckdbIndexJobRunner" -}}
+{{ include "hf.labels.commons" . }}
+app.kubernetes.io/component: "{{ include "name" . }}-clean-duckdb-job-runner"
+{{- end -}}
+
+{{- define "labels.cleanHfDatasetsCache" -}}
+{{ include "hf.labels.commons" . }}
+app.kubernetes.io/component: "{{ include "name" . }}-clean-hf-datasets-cache"
+{{- end -}}
+
+{{- define "labels.cleanStatsCache" -}}
+{{ include "hf.labels.commons" . }}
+app.kubernetes.io/component: "{{ include "name" . }}-clean-stats-cache"
+{{- end -}}
+
+{{- define "labels.postMessages" -}}
+{{ include "hf.labels.commons" . }}
+app.kubernetes.io/component: "{{ include "name" . }}-post-messages"
 {{- end -}}
 
 {{- define "labels.admin" -}}
@@ -128,6 +152,11 @@ app.kubernetes.io/component: "{{ include "name" . }}-rows"
 {{- define "labels.search" -}}
 {{ include "hf.labels.commons" . }}
 app.kubernetes.io/component: "{{ include "name" . }}-search"
+{{- end -}}
+
+{{- define "labels.sseApi" -}}
+{{ include "hf.labels.commons" . }}
+app.kubernetes.io/component: "{{ include "name" . }}-sse-api"
 {{- end -}}
 
 {{- define "labels.worker" -}}
@@ -266,6 +295,14 @@ See https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/#a-a
 */}}
 {{- define "search.url" -}}
 {{- printf "http://%s-search.%s.svc.cluster.local:80" ( include "name" . ) ( .Release.Namespace ) }}
+{{- end }}
+
+{{/*
+The URL to access the SSE API service from another container
+See https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/#a-aaaa-records
+*/}}
+{{- define "sseApi.url" -}}
+{{- printf "http://%s-sse-api.%s.svc.cluster.local:80" ( include "name" . ) ( .Release.Namespace ) }}
 {{- end }}
 
 {{/*

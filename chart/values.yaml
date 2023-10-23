@@ -19,6 +19,7 @@ global:
           api: 30022
           rows: 30023
           search: 30024
+          sseApi: 30025
 
 images:
   pullPolicy: IfNotPresent
@@ -60,6 +61,11 @@ images:
       useGlobalRegistry: false
       repository: datasets-server-services-search
       tag: sha-fb3399a
+    sseApi:
+      registry: huggingface
+      useGlobalRegistry: false
+      repository: datasets-server-services-sse-api
+      tag: sha-fb3399a
     storageAdmin:
       registry: huggingface
       useGlobalRegistry: false
@@ -72,6 +78,13 @@ images:
       tag: sha-fb3399a
 
 common:
+  # Comma-separated list of blocked datasets (e.g. if not supported by the Hub). No jobs will be processed for those datasets.
+  # See https://observablehq.com/@huggingface/blocked-datasets
+  blockedDatasets: "Graphcore/gqa,Graphcore/gqa-lxmert,Graphcore/vqa,Graphcore/vqa-lxmert,echarlaix/gqa-lxmert,echarlaix/vqa,echarlaix/vqa-lxmert,KakologArchives/KakologArchives,open-llm-leaderboard/*"
+  # Comma-separated list of the datasets for which we support dataset scripts.
+  # Unix shell-style wildcards also work in the dataset name for namespaced datasets, for example `some_namespace/*` to refer to all the datasets in the `some_namespace` namespace.
+  # The keyword `{{ALL_DATASETS_WITH_NO_NAMESPACE}}` refers to all the datasets without namespace.
+  datasetScriptsAllowList: "{{ALL_DATASETS_WITH_NO_NAMESPACE}}"
   # URL of the HuggingFace Hub
   hfEndpoint: ""
 
@@ -113,11 +126,20 @@ secrets:
   spawningToken:
     fromSecret: true
     secretName: "spawning-token"
+  s3:
+    accessKeyId:
+      fromSecret: true
+      secretName: "aws-access-key-id"
+    secretAccessKey:
+      fromSecret: true
+      secretName: "aws-secret-access-key"
 
 uid: 1000
 gid: 3000
 
 persistence:
+  cachedAssets:
+    existingClaim: ""
   descriptiveStatistics:
     existingClaim: ""
   duckDBIndex:
@@ -192,8 +214,6 @@ firstRows:
   columnsMaxNumber: 1_000
 
 parquetAndInfo:
-  # comma-separated list of the blocked datasets. Defaults to empty.
-  blockedDatasets: ""
   # the git commit message when the parquet files are uploaded to the Hub. Defaults to `Update parquet files`.
   commitMessage: "Update parquet files"
   # the maximum size in bytes of the dataset to pre-compute the parquet files. Bigger datasets, or datasets without that information, are partially streamed to get parquet files up to this value.
@@ -201,13 +221,11 @@ parquetAndInfo:
   # the maximum number of external files of the datasets. Bigger datasets, or datasets without that information, are partially streamed to get parquet files up to `maxDatasetSize` bytes.
   maxExternalDataFiles: "10_000"
   # the maximum size in bytes of the row groups of parquet datasets that are copied to the target revision. Bigger datasets, or datasets without that information, are partially streamed to get parquet files up to `maxDatasetSize` bytes.
-  maxRowGroupByteSizeForCopy: "100_000_000"
+  maxRowGroupByteSizeForCopy: "300_000_000"
   # comma-separated list of datasets that are fully converted to parquet (no partial conversion).
   noMaxSizeLimitDatasets: ""
   # the git revision of the dataset to use to prepare the parquet files. Defaults to `main`.
   sourceRevision: "main"
-  # comma-separated list of the supported datasets. If empty, all the datasets are processed. Defaults to empty.
-  supportedDatasets: ""
   # the git revision of the dataset where to store the parquet files. Make sure the hf_token (see the "Common" section) allows to write there. Defaults to `refs/convert/parquet`.
   targetRevision: "refs/convert/parquet"
   # the URL template to build the parquet file URLs. Defaults to `/datasets/%s/resolve/%s/%s`.
@@ -236,6 +254,7 @@ assets:
   # baseUrl: "not used for now"
   # Directory on the shared storage (audio files and images)
   storageDirectory: "/storage/assets"
+  s3FolderName: "assets"
 
 cachedAssets:
   # base URL for the cached assets files. It should be set accordingly to the datasets-server domain, eg https://datasets-server.huggingface.co/cached-assets
@@ -250,6 +269,11 @@ cachedAssets:
   keepMostRecentRowsNumber: 200
   # When cleaning the cached assets directory: maximum number of rows to discard.
   maxCleanedRowsNumber: 10000
+  s3FolderName: "cached-assets"
+
+s3:
+  bucket: "hf-datasets-server-statics"
+  region: "us-east-1"
 
 parquetMetadata:
   # Directory on the shared storage (parquet metadata files used for random access in /rows)
@@ -268,8 +292,10 @@ duckDBIndex:
   urlTemplate: "/datasets/%s/resolve/%s/%s"
   # the maximum size of the split parquets.
   maxParquetSizeBytes: "100_000_000"
-  # the time interval at which a downloaded index will be considered as expired and will be deleted
-  expiredTimeIntervalSeconds: 600
+
+rowsIndex:
+  # Maximum number of bytes to load in memory from parquet row groups to avoid OOM
+  maxArrowDataInMemory: "300_000_000"
 
 descriptiveStatistics:
   # Directory on the shared storage (used temporarily to download dataset locally in .parquet to compute statistics)
@@ -282,6 +308,10 @@ descriptiveStatistics:
 hfDatasetsCache:
   # Directory where the HF datasets cache data will be stored
   cacheDirectory: "/storage/hf-datasets-cache"
+
+discussions:
+  # name of the Hub user associated with the Datasets Server bot app
+  botAssociatedUserName: "parquet-converter"
 
 # --- jobs (pre-install/upgrade hooks) ---
 
@@ -299,7 +329,7 @@ mongodbMigration:
 
 cacheMaintenance:
   action: "skip"
-  # ^ allowed values are {skip,backfill,upgrade,collect-queue-metrics,collect-cache-metrics}
+  # ^ allowed values are {backfill, collect-queue-metrics, collect-cache-metrics, clean-directory, post-messages, skip}
   log:
     level: "info"
   backfill:
@@ -329,14 +359,91 @@ backfill:
       cpu: 0
   tolerations: []
 
-deleteIndexes:
+cleanHfDatasetsCache:
   enabled: true
   log:
     level: "info"
-  action: "delete-indexes"
+  action: "clean-directory"
+  schedule: "0 */3 * * *"
+  # every 3 hours
+  nodeSelector: {}
+  resources:
+    requests:
+      cpu: 0
+    limits:
+      cpu: 0
+  tolerations: []
+  # the time interval at which cached downloaded data files will be considered as expired and will be deleted
+  expiredTimeIntervalSeconds: 600
+  subfolderPattern: "*/datasets/*"
+
+
+cleanDuckdbIndexDownloads:
+  enabled: true
+  log:
+    level: "info"
+  action: "clean-directory"
   error_codes_to_retry: ""
   schedule: "0 0 * * *"
   # at 00:00
+  nodeSelector: {}
+  resources:
+    requests:
+      cpu: 0
+    limits:
+      cpu: 0
+  tolerations: []
+  # the time interval at which cached downloaded data files will be considered as expired and will be deleted
+  expiredTimeIntervalSeconds: 600
+  subfolderPattern: "downloads/*"
+
+cleanDuckdbIndexJobRunner:
+  enabled: true
+  log:
+    level: "info"
+  action: "clean-directory"
+  error_codes_to_retry: ""
+  schedule: "0 */3 * * *"
+  # every 3 hours
+  nodeSelector: {}
+  resources:
+    requests:
+      cpu: 0
+    limits:
+      cpu: 0
+  tolerations: []
+  # the time interval at which cached downloaded data files will be considered as expired and will be deleted
+  expiredTimeIntervalSeconds: 600
+  subfolderPattern: "job_runner/*"
+
+
+cleanStatsCache:
+  enabled: true
+  log:
+    level: "info"
+  action: "clean-directory"
+  error_codes_to_retry: ""
+  schedule: "0 */3 * * *"
+  # every 3 hours
+  nodeSelector: {}
+  resources:
+    requests:
+      cpu: 0
+    limits:
+      cpu: 0
+  tolerations: []
+  expiredTimeIntervalSeconds: 600
+  subfolderPattern: "*"
+
+
+postMessages:
+  enabled: true
+  log:
+    level: "info"
+  action: "post-messages"
+  error_codes_to_retry: ""
+  schedule: "10 0 * * *"
+  # at 00:10
   nodeSelector: {}
   resources:
     requests:
@@ -520,6 +627,29 @@ search:
   maxAgeLong: "120"
   # Number of seconds to set in the `max-age` header on technical endpoints
   maxAgeShort: "10"
+  # Directory where the uvicorn workers will write the prometheus metrics
+  # see https://github.com/prometheus/client_python#multiprocess-mode-eg-gunicorn
+  prometheusMultiprocDirectory: "/tmp"
+  # Hostname - it must not be set to localhost to work in Kube!
+  uvicornHostname: "0.0.0.0"
+  # Number of uvicorn workers for running the application
+  uvicornNumWorkers: "1"
+  # Application endpoint port
+  uvicornPort: 8080
+
+  nodeSelector: {}
+  replicas: 1
+  resources:
+    requests:
+      cpu: 0
+    limits:
+      cpu: 0
+  service:
+    type: ""
+    annotations: {}
+  tolerations: []
+
+sseApi:
   # Directory where the uvicorn workers will write the prometheus metrics
   # see https://github.com/prometheus/client_python#multiprocess-mode-eg-gunicorn
   prometheusMultiprocDirectory: "/tmp"

@@ -2,10 +2,13 @@
 # Copyright 2022 The HuggingFace Authors.
 
 import json
+import os
 from io import BytesIO
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Optional, Union
 from zlib import adler32
 
+import numpy as np
+import soundfile  # type: ignore
 from datasets import (
     Array2D,
     Array3D,
@@ -21,15 +24,16 @@ from datasets import (
     Value,
 )
 from datasets.features.features import FeatureType, _visit
-from numpy import ndarray
 from PIL import Image as PILImage  # type: ignore
 
-from libcommon.storage import StrPath
+from libcommon.storage_options import DirectoryStorageOptions, S3StorageOptions
 from libcommon.utils import FeatureItem
-from libcommon.viewer_utils.asset import create_audio_files, create_image_file
+from libcommon.viewer_utils.asset import create_audio_file, create_image_file
+
+UNSUPPORTED_FEATURES = [Value("binary")]
 
 
-def append_hash_suffix(string: str, json_path: Optional[List[Union[str, int]]] = None) -> str:
+def append_hash_suffix(string: str, json_path: Optional[list[Union[str, int]]] = None) -> str:
     """
     Hash the json path to a string.
     Args:
@@ -48,20 +52,26 @@ def append_hash_suffix(string: str, json_path: Optional[List[Union[str, int]]] =
 
 def image(
     dataset: str,
+    revision: str,
     config: str,
     split: str,
     row_idx: int,
     value: Any,
     featureName: str,
-    assets_base_url: str,
-    assets_directory: StrPath,
-    json_path: Optional[List[Union[str, int]]] = None,
-    overwrite: bool = True,
+    storage_options: Union[DirectoryStorageOptions, S3StorageOptions],
+    json_path: Optional[list[Union[str, int]]] = None,
 ) -> Any:
     if value is None:
         return None
     if isinstance(value, dict) and value.get("bytes"):
         value = PILImage.open(BytesIO(value["bytes"]))
+    elif (
+        isinstance(value, dict)
+        and "path" in value
+        and isinstance(value["path"], str)
+        and os.path.exists(value["path"])
+    ):
+        value = PILImage.open(value["path"])
     if not isinstance(value, PILImage.Image):
         raise TypeError(
             "Image cell must be a PIL image or an encoded dict of an image, "
@@ -72,15 +82,14 @@ def image(
         try:
             return create_image_file(
                 dataset=dataset,
+                revision=revision,
                 config=config,
                 split=split,
                 row_idx=row_idx,
                 column=featureName,
                 filename=f"{append_hash_suffix('image', json_path)}{ext}",
                 image=value,
-                assets_base_url=assets_base_url,
-                assets_directory=assets_directory,
-                overwrite=overwrite,
+                storage_options=storage_options,
             )
         except OSError:
             # if wrong format, try the next one, see https://github.com/huggingface/datasets-server/issues/191
@@ -92,60 +101,87 @@ def image(
 
 def audio(
     dataset: str,
+    revision: str,
     config: str,
     split: str,
     row_idx: int,
     value: Any,
     featureName: str,
-    assets_base_url: str,
-    assets_directory: StrPath,
-    json_path: Optional[List[Union[str, int]]] = None,
-    overwrite: bool = True,
+    storage_options: Union[DirectoryStorageOptions, S3StorageOptions],
+    json_path: Optional[list[Union[str, int]]] = None,
 ) -> Any:
     if value is None:
         return None
-    if isinstance(value, dict) and value.get("bytes"):
-        value = Audio().decode_example(value)
-    try:
-        array = value["array"]
-        sampling_rate = value["sampling_rate"]
-    except Exception as e:
+    if not isinstance(value, dict):
         raise TypeError(
-            "audio cell must contain 'array' and 'sampling_rate' fields, "
+            "Audio cell must be an encoded dict of an audio sample, "
             f"but got {str(value)[:300]}{'...' if len(str(value)) > 300 else ''}"
-        ) from e
-    if type(array) != ndarray:
-        raise TypeError("'array' field must be a numpy.ndarray")
-    if type(sampling_rate) != int:
-        raise TypeError("'sampling_rate' field must be an integer")
+        )
+
+    if "path" in value and isinstance(value["path"], str):
+        # .split("::")[0] for chained URLs like zip://audio.wav::https://foo.bar/data.zip
+        audio_file_extension = os.path.splitext(value["path"].split("::")[0])[1]
+        if not audio_file_extension:
+            raise ValueError(
+                f"An audio sample should have a 'path' with a valid extension but got '{audio_file_extension}'."
+            )
+    elif ("path" in value and value["path"] is None) or "array" in value:
+        audio_file_extension = ".wav"
+    else:
+        raise ValueError(
+            "An audio sample should have 'path' and 'bytes' (or 'array' and 'sampling_rate') but got"
+            f" {', '.join(value)}."
+        )
+
+    if "bytes" in value and isinstance(value["bytes"], bytes):
+        audio_file_bytes = value["bytes"]
+    elif "path" in value and isinstance(value["path"], str) and os.path.exists(value["path"]):
+        with open(value["path"], "rb") as f:
+            audio_file_bytes = f.read()
+    elif (
+        "array" in value
+        and isinstance(value["array"], np.ndarray)
+        and "sampling_rate" in value
+        and isinstance(value["sampling_rate"], int)
+    ):
+        buffer = BytesIO()
+        soundfile.write(buffer, value["array"], value["sampling_rate"], format="wav")
+        audio_file_bytes = buffer.getvalue()
+    else:
+        raise ValueError(
+            "An audio sample should have 'path' and 'bytes' (or 'array' and 'sampling_rate') but got"
+            f" {', '.join(value)}."
+        )
+
+    # convert to wav if the file is not wav or mp3 already
+    ext = audio_file_extension if audio_file_extension in [".wav", ".mp3"] else ".wav"
+
     # this function can raise, we don't catch it
-    return create_audio_files(
+    return create_audio_file(
         dataset=dataset,
+        revision=revision,
         config=config,
         split=split,
         row_idx=row_idx,
         column=featureName,
-        array=array,
-        sampling_rate=sampling_rate,
-        assets_base_url=assets_base_url,
-        filename_base=append_hash_suffix("audio", json_path),
-        assets_directory=assets_directory,
-        overwrite=overwrite,
+        audio_file_bytes=audio_file_bytes,
+        audio_file_extension=audio_file_extension,
+        storage_options=storage_options,
+        filename=f"{append_hash_suffix('audio', json_path)}{ext}",
     )
 
 
 def get_cell_value(
     dataset: str,
+    revision: str,
     config: str,
     split: str,
     row_idx: int,
     cell: Any,
     featureName: str,
     fieldType: Any,
-    assets_base_url: str,
-    assets_directory: StrPath,
-    json_path: Optional[List[Union[str, int]]] = None,
-    overwrite: bool = True,
+    storage_options: Union[DirectoryStorageOptions, S3StorageOptions],
+    json_path: Optional[list[Union[str, int]]] = None,
 ) -> Any:
     # always allow None values in the cells
     if cell is None:
@@ -153,28 +189,26 @@ def get_cell_value(
     if isinstance(fieldType, Image):
         return image(
             dataset=dataset,
+            revision=revision,
             config=config,
             split=split,
             row_idx=row_idx,
             value=cell,
             featureName=featureName,
-            assets_base_url=assets_base_url,
-            assets_directory=assets_directory,
+            storage_options=storage_options,
             json_path=json_path,
-            overwrite=overwrite,
         )
     elif isinstance(fieldType, Audio):
         return audio(
             dataset=dataset,
+            revision=revision,
             config=config,
             split=split,
             row_idx=row_idx,
             value=cell,
             featureName=featureName,
-            assets_base_url=assets_base_url,
-            assets_directory=assets_directory,
+            storage_options=storage_options,
             json_path=json_path,
-            overwrite=overwrite,
         )
     elif isinstance(fieldType, list):
         if type(cell) != list:
@@ -185,16 +219,15 @@ def get_cell_value(
         return [
             get_cell_value(
                 dataset=dataset,
+                revision=revision,
                 config=config,
                 split=split,
                 row_idx=row_idx,
                 cell=subCell,
                 featureName=featureName,
                 fieldType=subFieldType,
-                assets_base_url=assets_base_url,
-                assets_directory=assets_directory,
+                storage_options=storage_options,
                 json_path=json_path + [idx] if json_path else [idx],
-                overwrite=overwrite,
             )
             for (idx, subCell) in enumerate(cell)
         ]
@@ -205,16 +238,15 @@ def get_cell_value(
             return [
                 get_cell_value(
                     dataset=dataset,
+                    revision=revision,
                     config=config,
                     split=split,
                     row_idx=row_idx,
                     cell=subCell,
                     featureName=featureName,
                     fieldType=fieldType.feature,
-                    assets_base_url=assets_base_url,
-                    assets_directory=assets_directory,
+                    storage_options=storage_options,
                     json_path=json_path + [idx] if json_path else [idx],
-                    overwrite=overwrite,
                 )
                 for (idx, subCell) in enumerate(cell)
             ]
@@ -228,16 +260,15 @@ def get_cell_value(
                 key: [
                     get_cell_value(
                         dataset=dataset,
+                        revision=revision,
                         config=config,
                         split=split,
                         row_idx=row_idx,
                         cell=subCellItem,
                         featureName=featureName,
                         fieldType=fieldType.feature[key],
-                        assets_base_url=assets_base_url,
-                        assets_directory=assets_directory,
+                        storage_options=storage_options,
                         json_path=json_path + [key, idx] if json_path else [key, idx],
-                        overwrite=overwrite,
                     )
                     for (idx, subCellItem) in enumerate(subCell)
                 ]
@@ -251,16 +282,15 @@ def get_cell_value(
         return {
             key: get_cell_value(
                 dataset=dataset,
+                revision=revision,
                 config=config,
                 split=split,
                 row_idx=row_idx,
                 cell=subCell,
                 featureName=featureName,
                 fieldType=fieldType[key],
-                assets_base_url=assets_base_url,
-                assets_directory=assets_directory,
+                storage_options=storage_options,
                 json_path=json_path + [key] if json_path else [key],
-                overwrite=overwrite,
             )
             for (key, subCell) in cell.items()
         }
@@ -289,7 +319,7 @@ def get_cell_value(
 # > An array is an *ordered* sequence of zero or more values.
 # > The terms "object" and "array" come from the conventions of JavaScript.
 # from https://stackoverflow.com/a/7214312/7351594 / https://www.rfc-editor.org/rfc/rfc7159.html
-def to_features_list(features: Features) -> List[FeatureItem]:
+def to_features_list(features: Features) -> list[FeatureItem]:
     features_dict = features.to_dict()
     return [
         {
@@ -303,8 +333,8 @@ def to_features_list(features: Features) -> List[FeatureItem]:
 
 def get_supported_unsupported_columns(
     features: Features,
-    unsupported_features: List[FeatureType] = [],
-) -> Tuple[List[str], List[str]]:
+    unsupported_features: list[FeatureType] = UNSUPPORTED_FEATURES,
+) -> tuple[list[str], list[str]]:
     supported_columns, unsupported_columns = [], []
 
     for column, feature in features.items():

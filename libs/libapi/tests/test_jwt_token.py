@@ -3,7 +3,7 @@
 
 import datetime
 from contextlib import nullcontext as does_not_raise
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 from unittest.mock import patch
 
 import jwt
@@ -123,7 +123,7 @@ other_public_key_pem = other_private_key.get_verifying_key().to_pem().decode("ut
         ),
     ],
 )
-def test_get_jwt_public_keys_from_env(keys_env_var: str, expected_keys: List[str]) -> None:
+def test_get_jwt_public_keys_from_env(keys_env_var: str, expected_keys: list[str]) -> None:
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setenv("API_HF_JWT_ADDITIONAL_PUBLIC_KEYS", keys_env_var)
     api_config = ApiConfig.from_env(hf_endpoint="")
@@ -159,7 +159,7 @@ def test_get_jwt_public_keys_from_env(keys_env_var: str, expected_keys: List[str
     ],
 )
 def test_get_jwt_public_keys(
-    remote_payload: Any, keys_payload: List[str], expected_keys: List[str], expectation: Any
+    remote_payload: Any, keys_payload: list[str], expected_keys: list[str], expectation: Any
 ) -> None:
     def fake_fetch(
         url: str,
@@ -201,25 +201,30 @@ wrong_dataset = "wrong_dataset"
 exp_ok = datetime.datetime.now().timestamp() + 1000
 wrong_exp_1 = datetime.datetime.now().timestamp() - 1000
 wrong_exp_2 = 1
-sub_ok = f"datasets/{dataset_ok}"
+sub_ok_1 = f"datasets/{dataset_ok}"
+sub_ok_2 = f"/datasets/{dataset_ok}"
 sub_wrong_1 = dataset_ok
 sub_wrong_2 = f"dataset/{dataset_ok}"
 sub_wrong_3 = f"models/{dataset_ok}"
 sub_wrong_4 = f"datasets/{wrong_dataset}"
+sub_wrong_5 = f"/{dataset_ok}"
+sub_wrong_6 = f"/dataset/{dataset_ok}"
+sub_wrong_7 = f"/models/{dataset_ok}"
+sub_wrong_8 = f"/datasets/{wrong_dataset}"
 read_ok = True
 read_wrong_1 = False
 read_wrong_2 = "True"
-payload_ok = {"sub": sub_ok, "read": read_ok, "exp": exp_ok}
+payload_ok = {"sub": sub_ok_1, "read": read_ok, "exp": exp_ok}
 algorithm_ok = algorithm_name_eddsa
 algorithm_wrong = algorithm_name_rs256
 
 
-def encode_jwt(payload: Dict[str, Any]) -> str:
+def encode_jwt(payload: dict[str, Any]) -> str:
     return jwt.encode(payload, private_key_pem_ok, algorithm=algorithm_ok)
 
 
 def assert_jwt(
-    token: str, expectation: Any, public_keys: Optional[List[str]] = None, algorithm: str = algorithm_ok
+    token: str, expectation: Any, public_keys: Optional[list[str]] = None, algorithm: str = algorithm_ok
 ) -> None:
     if public_keys is None:
         public_keys = [public_key_pem_ok]
@@ -236,7 +241,7 @@ def assert_jwt(
         ([other_public_key_pem, public_key_pem_ok], does_not_raise()),
     ],
 )
-def test_validate_jwt_public_keys(public_keys: List[str], expectation: Any) -> None:
+def test_validate_jwt_public_keys(public_keys: list[str], expectation: Any) -> None:
     assert_jwt(encode_jwt(payload_ok), expectation, public_keys=public_keys)
 
 
@@ -255,16 +260,16 @@ def test_validate_jwt_algorithm(algorithm: str, expectation: Any) -> None:
     "payload,expectation",
     [
         ({}, pytest.raises(JWTMissingRequiredClaim)),
-        ({"sub": sub_ok}, pytest.raises(JWTMissingRequiredClaim)),
+        ({"sub": sub_ok_1}, pytest.raises(JWTMissingRequiredClaim)),
         ({"read": read_ok}, pytest.raises(JWTMissingRequiredClaim)),
         ({"exp": exp_ok}, pytest.raises(JWTMissingRequiredClaim)),
         ({"read": read_ok, "exp": exp_ok}, pytest.raises(JWTMissingRequiredClaim)),
-        ({"sub": sub_ok, "exp": exp_ok}, pytest.raises(JWTMissingRequiredClaim)),
-        ({"sub": sub_ok, "read": read_ok}, pytest.raises(JWTMissingRequiredClaim)),
-        ({"sub": sub_ok, "read": read_ok, "exp": exp_ok}, does_not_raise()),
+        ({"sub": sub_ok_1, "exp": exp_ok}, pytest.raises(JWTMissingRequiredClaim)),
+        ({"sub": sub_ok_1, "read": read_ok}, pytest.raises(JWTMissingRequiredClaim)),
+        ({"sub": sub_ok_1, "read": read_ok, "exp": exp_ok}, does_not_raise()),
     ],
 )
-def test_validate_jwt_content_format(payload: Dict[str, str], expectation: Any) -> None:
+def test_validate_jwt_content_format(payload: dict[str, str], expectation: Any) -> None:
     assert_jwt(encode_jwt(payload), expectation)
 
 
@@ -277,7 +282,7 @@ def test_validate_jwt_content_format(payload: Dict[str, str], expectation: Any) 
     ],
 )
 def test_validate_jwt_read(read: str, expectation: Any) -> None:
-    assert_jwt(encode_jwt({"sub": sub_ok, "read": read, "exp": exp_ok}), expectation)
+    assert_jwt(encode_jwt({"sub": sub_ok_1, "read": read, "exp": exp_ok}), expectation)
 
 
 @pytest.mark.parametrize(
@@ -287,7 +292,12 @@ def test_validate_jwt_read(read: str, expectation: Any) -> None:
         (sub_wrong_2, pytest.raises(JWTInvalidClaimSub)),
         (sub_wrong_3, pytest.raises(JWTInvalidClaimSub)),
         (sub_wrong_4, pytest.raises(JWTInvalidClaimSub)),
-        (sub_ok, does_not_raise()),
+        (sub_wrong_5, pytest.raises(JWTInvalidClaimSub)),
+        (sub_wrong_6, pytest.raises(JWTInvalidClaimSub)),
+        (sub_wrong_7, pytest.raises(JWTInvalidClaimSub)),
+        (sub_wrong_8, pytest.raises(JWTInvalidClaimSub)),
+        (sub_ok_1, does_not_raise()),
+        (sub_ok_2, does_not_raise()),
     ],
 )
 def test_validate_jwt_subject(sub: str, expectation: Any) -> None:
@@ -304,6 +314,6 @@ def test_validate_jwt_subject(sub: str, expectation: Any) -> None:
 )
 def test_validate_jwt_expiration(expiration: str, expectation: Any) -> None:
     assert_jwt(
-        encode_jwt({"sub": sub_ok, "read": read_ok, "exp": expiration}),
+        encode_jwt({"sub": sub_ok_1, "read": read_ok, "exp": expiration}),
         expectation,
     )

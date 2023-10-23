@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2022 The HuggingFace Authors.
 
-from typing import List
-
 import pytest
 
 from libcommon.config import ProcessingGraphConfig
@@ -13,16 +11,16 @@ from libcommon.processing_graph import (
 )
 
 
-def assert_lists_are_equal(a: List[ProcessingStep], b: List[str]) -> None:
+def assert_lists_are_equal(a: list[ProcessingStep], b: list[str]) -> None:
     assert sorted(processing_step.name for processing_step in a) == sorted(b)
 
 
 def assert_step(
     graph: ProcessingGraph,
     processing_step_name: str,
-    children: List[str],
-    parents: List[str],
-    ancestors: List[str],
+    children: list[str],
+    parents: list[str],
+    ancestors: list[str],
 ) -> None:
     assert_lists_are_equal(graph.get_children(processing_step_name), children)
     assert_lists_are_equal(graph.get_parents(processing_step_name), parents)
@@ -44,7 +42,7 @@ def test_graph() -> None:
         e: {"input_type": "dataset", "triggered_by": [c], "job_runner_version": 1},
         f: {"input_type": "dataset", "triggered_by": [a, b], "job_runner_version": 1},
     }
-    graph = ProcessingGraph(ProcessingGraphConfig(specification).specification)
+    graph = ProcessingGraph(ProcessingGraphConfig(specification))
 
     assert_step(graph, a, children=[c, d, f], parents=[], ancestors=[])
     assert_step(graph, b, children=[f], parents=[], ancestors=[])
@@ -57,7 +55,7 @@ def test_graph() -> None:
 @pytest.fixture(scope="module")
 def graph() -> ProcessingGraph:
     config = ProcessingGraphConfig()
-    return ProcessingGraph(config.specification)
+    return ProcessingGraph(ProcessingGraphConfig(config.specification))
 
 
 @pytest.mark.parametrize(
@@ -190,13 +188,13 @@ def graph() -> ProcessingGraph:
         ),
         (
             "dataset-size",
-            [],
+            ["dataset-hub-cache"],
             ["dataset-config-names", "config-size"],
             ["dataset-config-names", "config-parquet-and-info", "config-size"],
         ),
         (
             "dataset-is-valid",
-            [],
+            ["dataset-hub-cache"],
             [
                 "config-is-valid",
                 "dataset-config-names",
@@ -331,10 +329,32 @@ def graph() -> ProcessingGraph:
                 "config-split-names-from-streaming",
             ],
         ),
+        (
+            "dataset-hub-cache",
+            [],
+            ["dataset-is-valid", "dataset-size"],
+            [
+                "config-info",
+                "config-is-valid",
+                "config-parquet",
+                "config-parquet-and-info",
+                "config-parquet-metadata",
+                "config-size",
+                "config-split-names-from-info",
+                "config-split-names-from-streaming",
+                "dataset-config-names",
+                "dataset-is-valid",
+                "dataset-size",
+                "split-duckdb-index",
+                "split-first-rows-from-parquet",
+                "split-first-rows-from-streaming",
+                "split-is-valid",
+            ],
+        ),
     ],
 )
 def test_default_graph_steps(
-    graph: ProcessingGraph, processing_step_name: str, children: List[str], parents: List[str], ancestors: List[str]
+    graph: ProcessingGraph, processing_step_name: str, children: list[str], parents: list[str], ancestors: list[str]
 ) -> None:
     assert_step(graph, processing_step_name, children=children, parents=parents, ancestors=ancestors)
 

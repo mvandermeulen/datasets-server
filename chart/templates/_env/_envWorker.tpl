@@ -39,8 +39,6 @@
 - name: FIRST_ROWS_COLUMNS_MAX_NUMBER
   value: {{ .Values.firstRows.columnsMaxNumber| quote }}
 # specific to 'config-parquet-and-info' job runner
-- name: PARQUET_AND_INFO_BLOCKED_DATASETS
-  value: {{ .Values.parquetAndInfo.blockedDatasets | quote }}
 - name: PARQUET_AND_INFO_COMMIT_MESSAGE
   value: {{ .Values.parquetAndInfo.commitMessage | quote }}
 - name: PARQUET_AND_INFO_COMMITTER_HF_TOKEN
@@ -63,8 +61,6 @@
   value: {{ .Values.parquetAndInfo.noMaxSizeLimitDatasets | quote }}
 - name: PARQUET_AND_INFO_SOURCE_REVISION
   value: {{ .Values.parquetAndInfo.sourceRevision | quote }}
-- name: PARQUET_AND_INFO_SUPPORTED_DATASETS
-  value: {{ .Values.parquetAndInfo.supportedDatasets | quote }}
 - name: PARQUET_AND_INFO_TARGET_REVISION
   value: {{ .Values.parquetAndInfo.targetRevision | quote }}
 - name: PARQUET_AND_INFO_URL_TEMPLATE

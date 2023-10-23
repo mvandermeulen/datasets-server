@@ -2,14 +2,16 @@
 # Copyright 2023 The HuggingFace Authors.
 
 from asyncio import Semaphore
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from http import HTTPStatus
-from typing import Any, Callable, List, Mapping
+from typing import Any
 from unittest.mock import patch
 
 import pytest
 from aiohttp import ClientSession
 from aiolimiter import AsyncLimiter
+from libcommon.config import ProcessingGraphConfig
 from libcommon.constants import (
     PROCESSING_STEP_SPLIT_IMAGE_URL_COLUMNS_VERSION,
     PROCESSING_STEP_SPLIT_OPT_IN_OUT_URLS_SCAN_VERSION,
@@ -30,12 +32,13 @@ from worker.resources import LibrariesResource
 
 from ...constants import CI_SPAWNING_TOKEN
 from ...fixtures.hub import HubDatasetTest, get_default_config_split
+from ..utils import REVISION_NAME
 
 GetJobRunner = Callable[[str, str, str, AppConfig], SplitOptInOutUrlsScanJobRunner]
 
 
 async def mock_check_spawning(
-    image_urls: List[str], session: ClientSession, semaphore: Semaphore, limiter: AsyncLimiter, url: str
+    image_urls: list[str], session: ClientSession, semaphore: Semaphore, limiter: AsyncLimiter, url: str
 ) -> Any:
     return {"urls": [{"url": url, "optIn": "optIn" in url, "optOut": "optOut" in url} for url in image_urls]}
 
@@ -54,22 +57,42 @@ def get_job_runner(
     ) -> SplitOptInOutUrlsScanJobRunner:
         processing_step_name = SplitOptInOutUrlsScanJobRunner.get_job_type()
         processing_graph = ProcessingGraph(
-            {
-                "dataset-level": {"input_type": "dataset"},
-                "config-level": {"input_type": "dataset", "triggered_by": "dataset-level"},
-                processing_step_name: {
-                    "input_type": "dataset",
-                    "job_runner_version": SplitOptInOutUrlsScanJobRunner.get_job_runner_version(),
-                    "triggered_by": "config-level",
-                },
-            }
+            ProcessingGraphConfig(
+                {
+                    "dataset-level": {"input_type": "dataset"},
+                    "config-level": {"input_type": "dataset", "triggered_by": "dataset-level"},
+                    processing_step_name: {
+                        "input_type": "dataset",
+                        "job_runner_version": SplitOptInOutUrlsScanJobRunner.get_job_runner_version(),
+                        "triggered_by": "config-level",
+                    },
+                }
+            )
         )
+
+        upsert_response(
+            kind="dataset-config-names",
+            dataset=dataset,
+            dataset_git_revision=REVISION_NAME,
+            content={"config_names": [{"dataset": dataset, "config": config}]},
+            http_status=HTTPStatus.OK,
+        )
+
+        upsert_response(
+            kind="config-split-names-from-streaming",
+            dataset=dataset,
+            dataset_git_revision=REVISION_NAME,
+            config=config,
+            content={"splits": [{"dataset": dataset, "config": config, "split": split}]},
+            http_status=HTTPStatus.OK,
+        )
+
         return SplitOptInOutUrlsScanJobRunner(
             job_info={
                 "type": SplitOptInOutUrlsScanJobRunner.get_job_type(),
                 "params": {
                     "dataset": dataset,
-                    "revision": "revision",
+                    "revision": REVISION_NAME,
                     "config": config,
                     "split": split,
                 },
@@ -195,10 +218,10 @@ def test_compute(
     upsert_response(
         kind="split-image-url-columns",
         dataset=dataset,
+        dataset_git_revision=REVISION_NAME,
         config=config,
         split=split,
         content=upstream_content,
-        dataset_git_revision="dataset_git_revision",
         job_runner_version=PROCESSING_STEP_SPLIT_IMAGE_URL_COLUMNS_VERSION,
         progress=1.0,
         http_status=HTTPStatus.OK,
@@ -212,7 +235,7 @@ def test_compute(
 @pytest.mark.parametrize(
     "dataset,columns_max_number,upstream_content,upstream_status,exception_name",
     [
-        ("doesnotexist", 10, {}, HTTPStatus.OK, "CachedArtifactError"),
+        ("doesnotexist", 10, {}, HTTPStatus.OK, "CachedArtifactNotFoundError"),
         ("wrong_format", 10, {}, HTTPStatus.OK, "PreviousStepFormatError"),
         (
             "upstream_failed",
@@ -263,7 +286,7 @@ def test_compute_failed(
             config=config,
             split=split,
             content=upstream_content,
-            dataset_git_revision="dataset_git_revision",
+            dataset_git_revision=REVISION_NAME,
             job_runner_version=PROCESSING_STEP_SPLIT_OPT_IN_OUT_URLS_SCAN_VERSION,
             progress=1.0,
             http_status=upstream_status,
@@ -292,7 +315,7 @@ def test_compute_error_from_spawning(
         config=config,
         split=split,
         content=IMAGE_URL_COLUMNS_RESPONSE_WITH_DATA,
-        dataset_git_revision="dataset_git_revision",
+        dataset_git_revision=REVISION_NAME,
         job_runner_version=PROCESSING_STEP_SPLIT_OPT_IN_OUT_URLS_SCAN_VERSION,
         progress=1.0,
         http_status=HTTPStatus.OK,

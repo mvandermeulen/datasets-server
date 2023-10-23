@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2023 The HuggingFace Authors.
 
-from typing import List
-
 from libcommon.constants import (
     CACHE_METRICS_COLLECTION,
     METRICS_MONGOENGINE_ALIAS,
@@ -60,6 +58,9 @@ from mongodb_migration.migrations._20230703110100_cache_add_partial_field_in_con
 from mongodb_migration.migrations._20230705160600_queue_job_add_difficulty import (
     MigrationQueueAddDifficultyToJob,
 )
+from mongodb_migration.migrations._20230926095900_cache_add_has_fts_field_in_split_duckdb_index import (
+    MigrationAddHasFTSToSplitDuckdbIndexCacheResponse,
+)
 from mongodb_migration.renaming_migrations import (
     CacheRenamingMigration,
     QueueRenamingMigration,
@@ -68,7 +69,7 @@ from mongodb_migration.renaming_migrations import (
 
 # TODO: add a way to automatically collect migrations from the migrations/ folder
 class MigrationsCollector:
-    def get_migrations(self) -> List[Migration]:
+    def get_migrations(self) -> list[Migration]:
         return [
             MigrationExample(version="20221110230400", description="example"),
             MigrationAddForceToJob(
@@ -263,5 +264,9 @@ class MigrationsCollector:
                 description="drop queue metrics collection",
                 alias=METRICS_MONGOENGINE_ALIAS,
                 collection_name=QUEUE_METRICS_COLLECTION,
+            ),
+            MigrationAddHasFTSToSplitDuckdbIndexCacheResponse(
+                version="20230926095900",
+                description="add 'has_fts' field for 'split-duckdb-index' cache records",
             ),
         ]

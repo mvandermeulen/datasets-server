@@ -3,15 +3,25 @@
 
 from datetime import datetime
 from http import HTTPStatus
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
+from libcommon.config import ProcessingGraphConfig
 from libcommon.orchestrator import DatasetBackfillPlan
 from libcommon.processing_graph import Artifact, ProcessingGraph
-from libcommon.queue import Queue
+from libcommon.queue import JobTotalMetricDocument, Queue
 from libcommon.simple_cache import upsert_response
 from libcommon.utils import JobInfo, Priority
 
 DATASET_NAME = "dataset"
+
+
+DATASET_NAME_A = "test_dataset_a"
+DATASET_NAME_B = "test_dataset_b"
+DATASET_NAME_C = "test_dataset_c"
+DATASET_GIT_REVISION_A = "test_dataset_git_revision_a"
+DATASET_GIT_REVISION_B = "test_dataset_git_revision_b"
+DATASET_GIT_REVISION_C = "test_dataset_git_revision_C"
+
 
 REVISION_NAME = "revision"
 
@@ -38,11 +48,17 @@ STEP_DATASET_A = "dataset-a"
 STEP_CONFIG_B = "config-b"
 STEP_SPLIT_C = "split-c"
 PROCESSING_GRAPH = ProcessingGraph(
-    processing_graph_specification={
-        STEP_DATASET_A: {"input_type": "dataset", "provides_dataset_config_names": True},
-        STEP_CONFIG_B: {"input_type": "config", "provides_config_split_names": True, "triggered_by": STEP_DATASET_A},
-        STEP_SPLIT_C: {"input_type": "split", "triggered_by": STEP_CONFIG_B},
-    }
+    ProcessingGraphConfig(
+        {
+            STEP_DATASET_A: {"input_type": "dataset", "provides_dataset_config_names": True},
+            STEP_CONFIG_B: {
+                "input_type": "config",
+                "provides_config_split_names": True,
+                "triggered_by": STEP_DATASET_A,
+            },
+            STEP_SPLIT_C: {"input_type": "split", "triggered_by": STEP_CONFIG_B},
+        }
+    )
 )
 
 
@@ -105,9 +121,11 @@ ARTIFACT_SA_2_2 = f"{STEP_SA},{DATASET_NAME},{REVISION_NAME},{CONFIG_NAME_2},{SP
 #    +-------+
 #
 PROCESSING_GRAPH_ONE_STEP = ProcessingGraph(
-    processing_graph_specification={
-        STEP_DA: {"input_type": "dataset"},
-    }
+    ProcessingGraphConfig(
+        {
+            STEP_DA: {"input_type": "dataset"},
+        }
+    )
 )
 
 # Graph to test siblings, children, grand-children, multiple parents
@@ -129,12 +147,14 @@ PROCESSING_GRAPH_ONE_STEP = ProcessingGraph(
 #    +-------+
 #
 PROCESSING_GRAPH_GENEALOGY = ProcessingGraph(
-    processing_graph_specification={
-        STEP_DA: {"input_type": "dataset", "provides_dataset_config_names": True},
-        STEP_DB: {"input_type": "dataset"},  # sibling
-        STEP_DC: {"input_type": "dataset", "triggered_by": [STEP_DA, STEP_DB]},  # child
-        STEP_DD: {"input_type": "dataset", "triggered_by": [STEP_DB, STEP_DC]},  # grandchild
-    }
+    ProcessingGraphConfig(
+        {
+            STEP_DA: {"input_type": "dataset", "provides_dataset_config_names": True},
+            STEP_DB: {"input_type": "dataset"},  # sibling
+            STEP_DC: {"input_type": "dataset", "triggered_by": [STEP_DA, STEP_DB]},  # child
+            STEP_DD: {"input_type": "dataset", "triggered_by": [STEP_DB, STEP_DC]},  # grandchild
+        }
+    )
 )
 
 # Graph to test fan-in, fan-out
@@ -161,19 +181,21 @@ PROCESSING_GRAPH_GENEALOGY = ProcessingGraph(
 #    +-------+ +-------+
 #
 PROCESSING_GRAPH_FAN_IN_OUT = ProcessingGraph(
-    processing_graph_specification={
-        STEP_DA: {"input_type": "dataset", "provides_dataset_config_names": True},
-        STEP_CA: {
-            "input_type": "config",
-            "triggered_by": STEP_DA,
-            "provides_config_split_names": True,
-        },  # fan-out (D->C)
-        STEP_SA: {"input_type": "split", "triggered_by": STEP_CA},  # fan-out (C -> S)
-        # is fan-out (D -> S) possible? (we need the list of split names anyway)
-        STEP_DE: {"input_type": "dataset", "triggered_by": STEP_CA},  # fan-in (C -> D)
-        STEP_CB: {"input_type": "config", "triggered_by": STEP_SA},  # fan-in (S -> C)
-        STEP_DF: {"input_type": "dataset", "triggered_by": STEP_SA},  # fan-in (S -> D)
-    }
+    ProcessingGraphConfig(
+        {
+            STEP_DA: {"input_type": "dataset", "provides_dataset_config_names": True},
+            STEP_CA: {
+                "input_type": "config",
+                "triggered_by": STEP_DA,
+                "provides_config_split_names": True,
+            },  # fan-out (D->C)
+            STEP_SA: {"input_type": "split", "triggered_by": STEP_CA},  # fan-out (C -> S)
+            # is fan-out (D -> S) possible? (we need the list of split names anyway)
+            STEP_DE: {"input_type": "dataset", "triggered_by": STEP_CA},  # fan-in (C -> D)
+            STEP_CB: {"input_type": "config", "triggered_by": STEP_SA},  # fan-in (S -> C)
+            STEP_DF: {"input_type": "dataset", "triggered_by": STEP_SA},  # fan-in (S -> D)
+        }
+    )
 )
 
 # Graph to test parallel steps (ie. two steps that compute the same thing, and abort if the other already exists)
@@ -195,12 +217,14 @@ PROCESSING_GRAPH_FAN_IN_OUT = ProcessingGraph(
 #    +-------+
 #
 PROCESSING_GRAPH_PARALLEL = ProcessingGraph(
-    processing_graph_specification={
-        STEP_DA: {"input_type": "dataset", "provides_dataset_config_names": True},
-        STEP_DG: {"input_type": "dataset", "triggered_by": STEP_DA},
-        STEP_DH: {"input_type": "dataset", "triggered_by": STEP_DA},
-        STEP_DI: {"input_type": "dataset", "triggered_by": [STEP_DG, STEP_DH]},
-    }
+    ProcessingGraphConfig(
+        {
+            STEP_DA: {"input_type": "dataset", "provides_dataset_config_names": True},
+            STEP_DG: {"input_type": "dataset", "triggered_by": STEP_DA},
+            STEP_DH: {"input_type": "dataset", "triggered_by": STEP_DA},
+            STEP_DI: {"input_type": "dataset", "triggered_by": [STEP_DG, STEP_DH]},
+        }
+    )
 )
 
 
@@ -211,7 +235,7 @@ def get_dataset_backfill_plan(
     processing_graph: ProcessingGraph,
     dataset: str = DATASET_NAME,
     revision: str = REVISION_NAME,
-    error_codes_to_retry: Optional[List[str]] = None,
+    error_codes_to_retry: Optional[list[str]] = None,
     cache_max_days: Optional[int] = None,
 ) -> DatasetBackfillPlan:
     return DatasetBackfillPlan(
@@ -232,11 +256,11 @@ def assert_equality(value: Any, expected: Any, context: Optional[str] = None) ->
 
 def assert_dataset_backfill_plan(
     dataset_backfill_plan: DatasetBackfillPlan,
-    cache_status: Dict[str, List[str]],
-    queue_status: Dict[str, List[str]],
-    tasks: List[str],
-    config_names: Optional[List[str]] = None,
-    split_names_in_first_config: Optional[List[str]] = None,
+    cache_status: dict[str, list[str]],
+    queue_status: dict[str, list[str]],
+    tasks: list[str],
+    config_names: Optional[list[str]] = None,
+    split_names_in_first_config: Optional[list[str]] = None,
 ) -> None:
     if config_names is not None:
         assert_equality(dataset_backfill_plan.dataset_state.config_names, config_names, context="config_names")
@@ -332,7 +356,7 @@ def compute_all(
     processing_graph: ProcessingGraph,
     dataset: str = DATASET_NAME,
     revision: str = REVISION_NAME,
-    error_codes_to_retry: Optional[List[str]] = None,
+    error_codes_to_retry: Optional[list[str]] = None,
 ) -> None:
     dataset_backfill_plan = get_dataset_backfill_plan(processing_graph, dataset, revision, error_codes_to_retry)
     max_runs = 100
@@ -364,3 +388,9 @@ def artifact_id_to_job_info(artifact_id: str) -> JobInfo:
         priority=Priority.NORMAL,
         difficulty=DIFFICULTY,
     )
+
+
+def assert_metric(job_type: str, status: str, total: int) -> None:
+    metric = JobTotalMetricDocument.objects(job_type=job_type, status=status).first()
+    assert metric is not None
+    assert metric.total == total

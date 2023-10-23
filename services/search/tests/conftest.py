@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2023 The HuggingFace Authors.
 
-from typing import Iterator
+from collections.abc import Iterator
 
 from libapi.config import UvicornConfig
 from libcommon.processing_graph import ProcessingGraph
@@ -45,12 +45,17 @@ def app_config(monkeypatch_session: MonkeyPatch) -> AppConfig:
 
 @fixture(scope="session")
 def processing_graph(app_config: AppConfig) -> ProcessingGraph:
-    return ProcessingGraph(app_config.processing_graph.specification)
+    return ProcessingGraph(app_config.processing_graph)
 
 
 @fixture(scope="session")
 def search_endpoint() -> str:
     return "/search"
+
+
+@fixture(scope="session")
+def filter_endpoint() -> str:
+    return "/filter"
 
 
 @fixture(autouse=True)
@@ -74,7 +79,7 @@ def uvicorn_config(monkeypatch_session: MonkeyPatch) -> UvicornConfig:
 
 @fixture(scope="session")
 def httpserver_listen_address(uvicorn_config: UvicornConfig) -> tuple[str, int]:
-    return (uvicorn_config.hostname, uvicorn_config.port)
+    return uvicorn_config.hostname, uvicorn_config.port
 
 
 @fixture(scope="session")

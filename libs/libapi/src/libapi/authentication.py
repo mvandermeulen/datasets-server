@@ -2,12 +2,11 @@
 # Copyright 2022 The HuggingFace Authors.
 
 import logging
-from typing import List, Literal, Optional
+from collections.abc import Generator
+from typing import Literal, Optional
 
-import requests
+import httpx
 from libcommon.prometheus import StepProfiler
-from requests import PreparedRequest
-from requests.auth import AuthBase
 from starlette.requests import Request
 
 from libapi.exceptions import (
@@ -18,24 +17,20 @@ from libapi.exceptions import (
 from libapi.jwt_token import validate_jwt
 
 
-class RequestAuth(AuthBase):
+class RequestAuth(httpx.Auth):
     """Attaches input Request authentication headers to the given Request object."""
 
     def __init__(self, request: Optional[Request]) -> None:
-        if request is not None:
-            self.cookie = request.headers.get("cookie")
-            self.authorization = request.headers.get("authorization")
-        else:
-            self.cookie = None
-            self.authorization = None
+        self.cookie = request.headers.get("cookie") if request else None
+        self.authorization = request.headers.get("authorization") if request else None
 
-    def __call__(self, r: PreparedRequest) -> PreparedRequest:
-        # modify and return the request
+    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
+        # modify and yield the request
         if self.cookie:
-            r.headers["cookie"] = self.cookie
+            request.headers["cookie"] = self.cookie
         if self.authorization:
-            r.headers["authorization"] = self.authorization
-        return r
+            request.headers["authorization"] = self.authorization
+        yield request
 
 
 def get_jwt_token(request: Optional[Request] = None) -> Optional[str]:
@@ -51,11 +46,11 @@ def get_jwt_token(request: Optional[Request] = None) -> Optional[str]:
     return None if token == authorization else token
 
 
-def auth_check(
+async def auth_check(
     dataset: str,
     external_auth_url: Optional[str] = None,
     request: Optional[Request] = None,
-    hf_jwt_public_keys: Optional[List[str]] = None,
+    hf_jwt_public_keys: Optional[list[str]] = None,
     hf_jwt_algorithm: Optional[str] = None,
     hf_timeout_seconds: Optional[float] = None,
 ) -> Literal[True]:
@@ -73,7 +68,7 @@ def auth_check(
           If None, the dataset is always authorized.
         request (Request | None): the request which optionally bears authentication headers: "cookie",
           "authorization" or "X-Api-Key"
-        hf_jwt_public_keys (List[str]|None): the public keys to use to decode the JWT token
+        hf_jwt_public_keys (list[str]|None): the public keys to use to decode the JWT token
         hf_jwt_algorithm (str): the algorithm to use to decode the JWT token
         hf_timeout_seconds (float|None): the timeout in seconds for the external authentication service. It
           is used both for the connection timeout and the read timeout. If None, the request never timeouts.
@@ -111,7 +106,8 @@ def auth_check(
                     f"Checking authentication on the Hugging Face Hub for dataset {dataset}, url: {url}, timeout:"
                     f" {hf_timeout_seconds}, authorization: {auth.authorization}"
                 )
-                response = requests.get(url, auth=auth, timeout=hf_timeout_seconds)
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(url, auth=auth, timeout=hf_timeout_seconds)
             except Exception as err:
                 raise AuthCheckHubRequestError(
                     (

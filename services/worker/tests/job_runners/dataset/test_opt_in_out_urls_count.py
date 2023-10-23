@@ -1,19 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2022 The HuggingFace Authors.
 
+from collections.abc import Callable
 from http import HTTPStatus
-from typing import Any, Callable, List
+from typing import Any
 
 import pytest
+from libcommon.config import ProcessingGraphConfig
 from libcommon.processing_graph import ProcessingGraph
 from libcommon.resources import CacheMongoResource, QueueMongoResource
-from libcommon.simple_cache import CachedArtifactError, upsert_response
+from libcommon.simple_cache import CachedArtifactNotFoundError, upsert_response
 from libcommon.utils import Priority
 
 from worker.config import AppConfig
 from worker.job_runners.dataset.opt_in_out_urls_count import (
     DatasetOptInOutUrlsCountJobRunner,
 )
+
+from ..utils import REVISION_NAME
 
 
 @pytest.fixture(autouse=True)
@@ -36,19 +40,21 @@ def get_job_runner(
     ) -> DatasetOptInOutUrlsCountJobRunner:
         processing_step_name = DatasetOptInOutUrlsCountJobRunner.get_job_type()
         processing_graph = ProcessingGraph(
-            {
-                processing_step_name: {
-                    "input_type": "dataset",
-                    "job_runner_version": DatasetOptInOutUrlsCountJobRunner.get_job_runner_version(),
+            ProcessingGraphConfig(
+                {
+                    processing_step_name: {
+                        "input_type": "dataset",
+                        "job_runner_version": DatasetOptInOutUrlsCountJobRunner.get_job_runner_version(),
+                    }
                 }
-            }
+            )
         )
         return DatasetOptInOutUrlsCountJobRunner(
             job_info={
                 "type": DatasetOptInOutUrlsCountJobRunner.get_job_type(),
                 "params": {
                     "dataset": dataset,
-                    "revision": "revision",
+                    "revision": REVISION_NAME,
                     "config": None,
                     "split": None,
                 },
@@ -184,8 +190,8 @@ def test_compute(
     dataset: str,
     config_names_status: HTTPStatus,
     config_names_content: Any,
-    config_upstream_status: List[HTTPStatus],
-    config_upstream_content: List[Any],
+    config_upstream_status: list[HTTPStatus],
+    config_upstream_content: list[Any],
     expected_error_code: str,
     expected_content: Any,
     should_raise: bool,
@@ -193,6 +199,7 @@ def test_compute(
     upsert_response(
         kind="dataset-config-names",
         dataset=dataset,
+        dataset_git_revision=REVISION_NAME,
         content=config_names_content,
         http_status=config_names_status,
     )
@@ -204,6 +211,7 @@ def test_compute(
             upsert_response(
                 kind="config-opt-in-out-urls-count",
                 dataset=dataset,
+                dataset_git_revision=REVISION_NAME,
                 config=split_item["config"],
                 content=content,
                 http_status=status,
@@ -221,5 +229,5 @@ def test_compute(
 def test_doesnotexist(app_config: AppConfig, get_job_runner: GetJobRunner) -> None:
     dataset = "doesnotexist"
     job_runner = get_job_runner(dataset, app_config)
-    with pytest.raises(CachedArtifactError):
+    with pytest.raises(CachedArtifactNotFoundError):
         job_runner.compute()

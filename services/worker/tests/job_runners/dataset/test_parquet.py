@@ -1,21 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2022 The HuggingFace Authors.
 
+from collections.abc import Callable
 from http import HTTPStatus
-from typing import Any, Callable
+from typing import Any
 
 import pytest
+from libcommon.config import ProcessingGraphConfig
 from libcommon.exceptions import PreviousStepFormatError
 from libcommon.processing_graph import ProcessingGraph
 from libcommon.resources import CacheMongoResource, QueueMongoResource
-from libcommon.simple_cache import CachedArtifactError, upsert_response
+from libcommon.simple_cache import (
+    CachedArtifactError,
+    CachedArtifactNotFoundError,
+    upsert_response,
+)
 from libcommon.utils import Priority, SplitHubFile
 
 from worker.config import AppConfig
 from worker.dtos import ConfigParquetResponse, DatasetParquetResponse
 from worker.job_runners.dataset.parquet import DatasetParquetJobRunner
 
-from ..utils import UpstreamResponse
+from ..utils import REVISION_NAME, UpstreamResponse
 
 
 @pytest.fixture(autouse=True)
@@ -38,19 +44,21 @@ def get_job_runner(
     ) -> DatasetParquetJobRunner:
         processing_step_name = DatasetParquetJobRunner.get_job_type()
         processing_graph = ProcessingGraph(
-            {
-                processing_step_name: {
-                    "input_type": "dataset",
-                    "job_runner_version": DatasetParquetJobRunner.get_job_runner_version(),
+            ProcessingGraphConfig(
+                {
+                    processing_step_name: {
+                        "input_type": "dataset",
+                        "job_runner_version": DatasetParquetJobRunner.get_job_runner_version(),
+                    }
                 }
-            }
+            )
         )
         return DatasetParquetJobRunner(
             job_info={
                 "type": DatasetParquetJobRunner.get_job_type(),
                 "params": {
                     "dataset": dataset,
-                    "revision": "revision",
+                    "revision": REVISION_NAME,
                     "config": None,
                     "split": None,
                 },
@@ -74,6 +82,7 @@ def get_job_runner(
                 UpstreamResponse(
                     kind="dataset-config-names",
                     dataset="ok",
+                    dataset_git_revision=REVISION_NAME,
                     config=None,
                     http_status=HTTPStatus.OK,
                     content={
@@ -86,6 +95,7 @@ def get_job_runner(
                 UpstreamResponse(
                     kind="config-parquet",
                     dataset="ok",
+                    dataset_git_revision=REVISION_NAME,
                     config="config_1",
                     http_status=HTTPStatus.OK,
                     content=ConfigParquetResponse(
@@ -106,6 +116,7 @@ def get_job_runner(
                 UpstreamResponse(
                     kind="config-parquet",
                     dataset="ok",
+                    dataset_git_revision=REVISION_NAME,
                     config="config_2",
                     http_status=HTTPStatus.OK,
                     content=ConfigParquetResponse(
@@ -146,6 +157,7 @@ def get_job_runner(
                 UpstreamResponse(
                     kind="dataset-config-names",
                     dataset="status_error",
+                    dataset_git_revision=REVISION_NAME,
                     config=None,
                     http_status=HTTPStatus.NOT_FOUND,
                     content={"error": "error"},
@@ -161,6 +173,7 @@ def get_job_runner(
                 UpstreamResponse(
                     kind="dataset-config-names",
                     dataset="format_error",
+                    dataset_git_revision=REVISION_NAME,
                     config=None,
                     http_status=HTTPStatus.OK,
                     content={"not_parquet_files": "wrong_format"},
@@ -195,5 +208,5 @@ def test_compute(
 def test_doesnotexist(app_config: AppConfig, get_job_runner: GetJobRunner) -> None:
     dataset = "doesnotexist"
     job_runner = get_job_runner(dataset, app_config)
-    with pytest.raises(CachedArtifactError):
+    with pytest.raises(CachedArtifactNotFoundError):
         job_runner.compute()

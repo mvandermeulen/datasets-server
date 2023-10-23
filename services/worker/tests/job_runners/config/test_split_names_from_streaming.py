@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2022 The HuggingFace Authors.
 
+from collections.abc import Callable
 from dataclasses import replace
-from typing import Callable
+from http import HTTPStatus
 
 import pytest
+from libcommon.config import ProcessingGraphConfig
 from libcommon.exceptions import CustomError, DatasetManualDownloadError
 from libcommon.processing_graph import ProcessingGraph
 from libcommon.resources import CacheMongoResource, QueueMongoResource
+from libcommon.simple_cache import upsert_response
 from libcommon.utils import Priority
 
 from worker.config import AppConfig
@@ -18,6 +21,7 @@ from worker.job_runners.config.split_names_from_streaming import (
 from worker.resources import LibrariesResource
 
 from ...fixtures.hub import HubDatasetTest, get_default_config_split
+from ..utils import REVISION_NAME
 
 GetJobRunner = Callable[[str, str, AppConfig], ConfigSplitNamesFromStreamingJobRunner]
 
@@ -35,21 +39,32 @@ def get_job_runner(
     ) -> ConfigSplitNamesFromStreamingJobRunner:
         processing_step_name = ConfigSplitNamesFromStreamingJobRunner.get_job_type()
         processing_graph = ProcessingGraph(
-            {
-                "dataset-level": {"input_type": "dataset"},
-                processing_step_name: {
-                    "input_type": "dataset",
-                    "job_runner_version": ConfigSplitNamesFromStreamingJobRunner.get_job_runner_version(),
-                    "triggered_by": "dataset-level",
-                },
-            }
+            ProcessingGraphConfig(
+                {
+                    "dataset-level": {"input_type": "dataset"},
+                    processing_step_name: {
+                        "input_type": "dataset",
+                        "job_runner_version": ConfigSplitNamesFromStreamingJobRunner.get_job_runner_version(),
+                        "triggered_by": "dataset-level",
+                    },
+                }
+            )
         )
+
+        upsert_response(
+            kind="dataset-config-names",
+            dataset=dataset,
+            dataset_git_revision=REVISION_NAME,
+            content={"config_names": [{"dataset": dataset, "config": config}]},
+            http_status=HTTPStatus.OK,
+        )
+
         return ConfigSplitNamesFromStreamingJobRunner(
             job_info={
                 "type": ConfigSplitNamesFromStreamingJobRunner.get_job_type(),
                 "params": {
                     "dataset": dataset,
-                    "revision": "revision",
+                    "revision": REVISION_NAME,
                     "config": config,
                     "split": None,
                 },
@@ -143,5 +158,5 @@ def test_compute_split_names_from_streaming_response_raises(
 ) -> None:
     with pytest.raises(DatasetManualDownloadError):
         compute_split_names_from_streaming_response(
-            hub_public_manual_download, "default", hf_token=app_config.common.hf_token
+            hub_public_manual_download, "default", hf_token=app_config.common.hf_token, dataset_scripts_allow_list=[]
         )

@@ -5,7 +5,7 @@ import logging
 import sys
 import traceback
 from http import HTTPStatus
-from typing import List, Literal, Optional, TypedDict, Union
+from typing import Literal, Optional, TypedDict, Union
 
 
 class ErrorResponseWithoutCause(TypedDict):
@@ -15,7 +15,7 @@ class ErrorResponseWithoutCause(TypedDict):
 class ErrorResponseWithCause(ErrorResponseWithoutCause, total=False):
     cause_exception: str
     cause_message: str
-    cause_traceback: List[str]
+    cause_traceback: list[str]
 
 
 ErrorResponse = Union[ErrorResponseWithoutCause, ErrorResponseWithCause]
@@ -49,7 +49,7 @@ class CustomError(LoggedError):
             self.cause_exception: Optional[str] = type(cause).__name__
             self.cause_message: Optional[str] = str(cause)
             (t, v, tb) = sys.exc_info()
-            self.cause_traceback: Optional[List[str]] = traceback.format_exception(t, v, tb)
+            self.cause_traceback: Optional[list[str]] = traceback.format_exception(t, v, tb)
         else:
             self.cause_exception = None
             self.cause_message = None
@@ -74,8 +74,9 @@ class CustomError(LoggedError):
 
 CacheableErrorCode = Literal[
     "CacheDirectoryNotInitializedError",
-    "ConfigNamesError",
     "ComputationError",
+    "ConfigNamesError",
+    "ConfigNotFoundError",
     "CreateCommitError",
     "DatasetInBlockListError",
     "DatasetInfoHubRequestError",
@@ -84,9 +85,12 @@ CacheableErrorCode = Literal[
     "DatasetNotFoundError",
     "DatasetRevisionEmptyError",
     "DatasetRevisionNotFoundError",
+    "DatasetScriptError",
+    "DatasetWithScriptNotSupportedError",
     "DatasetWithTooManyConfigsError",
     "DatasetWithTooManyParquetFilesError",
     "DisabledViewerError",
+    "DiskError",
     "DuckDBIndexFileNotFoundError",
     "EmptyDatasetError",
     "ExternalFilesSizeRequestConnectionError",
@@ -101,7 +105,6 @@ CacheableErrorCode = Literal[
     "JobManagerExceededMaximumDurationError",
     "LockedDatasetTimeoutError",
     "MissingSpawningTokenError",
-    "NoIndexableColumnsError",
     "NoSupportedFeaturesError",
     "NormalRowsError",
     "ParameterMissingError",
@@ -150,6 +153,19 @@ class ConfigNamesError(CacheableError):
 
     def __init__(self, message: str, cause: Optional[BaseException] = None):
         super().__init__(message, HTTPStatus.INTERNAL_SERVER_ERROR, "ConfigNamesError", cause, True)
+
+
+class ConfigNotFoundError(CacheableError):
+    """The config does not exist."""
+
+    def __init__(self, message: str, cause: Optional[BaseException] = None):
+        super().__init__(
+            message=message,
+            status_code=HTTPStatus.NOT_FOUND,
+            code="ConfigNotFoundError",
+            cause=cause,
+            disclose_cause=False,
+        )
 
 
 class CreateCommitError(CacheableError):
@@ -220,6 +236,13 @@ class DatasetRevisionNotFoundError(CacheableError):
         super().__init__(message, HTTPStatus.NOT_FOUND, "DatasetRevisionNotFoundError", cause, False)
 
 
+class DatasetScriptError(CacheableError):
+    """The dataset script generated an error."""
+
+    def __init__(self, message: str, cause: Optional[BaseException] = None):
+        super().__init__(message, HTTPStatus.NOT_IMPLEMENTED, "DatasetScriptError", cause, False)
+
+
 class DatasetWithTooManyConfigsError(CacheableError):
     """The number of configs of a dataset exceeded the limit."""
 
@@ -249,6 +272,19 @@ class DisabledViewerError(CacheableError):
             message=message,
             status_code=HTTPStatus.NOT_FOUND,
             code="DisabledViewerError",
+            cause=cause,
+            disclose_cause=False,
+        )
+
+
+class DiskError(CacheableError):
+    """Disk-related issues, for example, incorrect permissions."""
+
+    def __init__(self, message: str, cause: Optional[BaseException] = None):
+        super().__init__(
+            message=message,
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            code="DiskError",
             cause=cause,
             disclose_cause=False,
         )
@@ -364,13 +400,6 @@ class NormalRowsError(CacheableError):
         super().__init__(message, HTTPStatus.INTERNAL_SERVER_ERROR, "NormalRowsError", cause, True)
 
 
-class NoIndexableColumnsError(CacheableError):
-    """The split does not have string columns to index."""
-
-    def __init__(self, message: str, cause: Optional[BaseException] = None):
-        super().__init__(message, HTTPStatus.NOT_IMPLEMENTED, "NoIndexableColumnsError", cause, True)
-
-
 class NoSupportedFeaturesError(CacheableError):
     """The dataset does not have any features which types are supported by a worker's processing pipeline."""
 
@@ -466,6 +495,13 @@ class SplitWithTooBigParquetError(CacheableError):
         super().__init__(message, HTTPStatus.INTERNAL_SERVER_ERROR, "SplitWithTooBigParquetError", cause, False)
 
 
+class StatisticsComputationError(CacheableError):
+    """An unexpected behavior or error occurred during statistics computations."""
+
+    def __init__(self, message: str, cause: Optional[BaseException] = None):
+        super().__init__(message, HTTPStatus.INTERNAL_SERVER_ERROR, "ComputationError", cause, True)
+
+
 class StreamingRowsError(CacheableError):
     """The rows could not be fetched in streaming mode."""
 
@@ -514,8 +550,8 @@ class UnsupportedExternalFilesError(CacheableError):
         super().__init__(message, HTTPStatus.NOT_IMPLEMENTED, "UnsupportedExternalFilesError", cause, True)
 
 
-class StatisticsComputationError(CacheableError):
-    """An unexpected behavior or error occurred during statistics computations."""
+class DatasetWithScriptNotSupportedError(CacheableError):
+    """We don't support some datasets because they have a dataset script."""
 
     def __init__(self, message: str, cause: Optional[BaseException] = None):
-        super().__init__(message, HTTPStatus.INTERNAL_SERVER_ERROR, "ComputationError", cause, True)
+        super().__init__(message, HTTPStatus.NOT_IMPLEMENTED, "DatasetWithScriptNotSupportedError", cause, True)

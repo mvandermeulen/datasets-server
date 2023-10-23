@@ -2,7 +2,7 @@
 # Copyright 2022 The HuggingFace Authors.
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 from environs import Env
 from libcommon.config import (
@@ -13,6 +13,8 @@ from libcommon.config import (
     ParquetMetadataConfig,
     ProcessingGraphConfig,
     QueueConfig,
+    RowsIndexConfig,
+    S3Config,
 )
 
 WORKER_CONTENT_MAX_BYTES = 10_000_000
@@ -30,7 +32,7 @@ WORKER_SLEEP_SECONDS = 15
 WORKER_STATE_FILE_PATH = None
 
 
-def get_empty_str_list() -> List[str]:
+def get_empty_str_list() -> list[str]:
     return []
 
 
@@ -51,7 +53,7 @@ class WorkerConfig:
     max_missing_heartbeats: int = WORKER_MAX_MISSING_HEARTBEATS
     sleep_seconds: float = WORKER_SLEEP_SECONDS
     state_file_path: Optional[str] = WORKER_STATE_FILE_PATH
-    storage_paths: List[str] = field(default_factory=get_empty_str_list)
+    storage_paths: list[str] = field(default_factory=get_empty_str_list)
 
     @classmethod
     def from_env(cls) -> "WorkerConfig":
@@ -176,7 +178,7 @@ PARQUET_AND_INFO_COMMITTER_HF_TOKEN = None
 PARQUET_AND_INFO_MAX_DATASET_SIZE = 100_000_000
 PARQUET_AND_INFO_MAX_EXTERNAL_DATA_FILES = 10_000
 PARQUET_AND_INFO_MAX_ROW_GROUP_BYTE_SIZE_FOR_COPY = 100_000_000
-PARQUET_AND_INFO_NO_MAX_SIZE_LIMIT_DATASETS: List[str] = []
+PARQUET_AND_INFO_NO_MAX_SIZE_LIMIT_DATASETS: list[str] = []
 PARQUET_AND_INFO_SOURCE_REVISION = "main"
 PARQUET_AND_INFO_TARGET_REVISION = "refs/convert/parquet"
 PARQUET_AND_INFO_URL_TEMPLATE = "/datasets/%s/resolve/%s/%s"
@@ -184,15 +186,13 @@ PARQUET_AND_INFO_URL_TEMPLATE = "/datasets/%s/resolve/%s/%s"
 
 @dataclass(frozen=True)
 class ParquetAndInfoConfig:
-    blocked_datasets: List[str] = field(default_factory=get_empty_str_list)
     commit_message: str = PARQUET_AND_INFO_COMMIT_MESSAGE
     committer_hf_token: Optional[str] = PARQUET_AND_INFO_COMMITTER_HF_TOKEN
     max_dataset_size: int = PARQUET_AND_INFO_MAX_DATASET_SIZE
     max_external_data_files: int = PARQUET_AND_INFO_MAX_EXTERNAL_DATA_FILES
     max_row_group_byte_size_for_copy: int = PARQUET_AND_INFO_MAX_ROW_GROUP_BYTE_SIZE_FOR_COPY
-    no_max_size_limit_datasets: List[str] = field(default_factory=PARQUET_AND_INFO_NO_MAX_SIZE_LIMIT_DATASETS.copy)
+    no_max_size_limit_datasets: list[str] = field(default_factory=PARQUET_AND_INFO_NO_MAX_SIZE_LIMIT_DATASETS.copy)
     source_revision: str = PARQUET_AND_INFO_SOURCE_REVISION
-    supported_datasets: List[str] = field(default_factory=get_empty_str_list)
     target_revision: str = PARQUET_AND_INFO_TARGET_REVISION
     url_template: str = PARQUET_AND_INFO_URL_TEMPLATE
 
@@ -201,7 +201,6 @@ class ParquetAndInfoConfig:
         env = Env(expand_vars=True)
         with env.prefixed("PARQUET_AND_INFO_"):
             return cls(
-                blocked_datasets=env.list(name="BLOCKED_DATASETS", default=get_empty_str_list()),
                 commit_message=env.str(name="COMMIT_MESSAGE", default=PARQUET_AND_INFO_COMMIT_MESSAGE),
                 committer_hf_token=env.str(name="COMMITTER_HF_TOKEN", default=PARQUET_AND_INFO_COMMITTER_HF_TOKEN),
                 max_dataset_size=env.int(name="MAX_DATASET_SIZE", default=PARQUET_AND_INFO_MAX_DATASET_SIZE),
@@ -215,7 +214,6 @@ class ParquetAndInfoConfig:
                     name="NO_MAX_SIZE_LIMIT_DATASETS", default=PARQUET_AND_INFO_NO_MAX_SIZE_LIMIT_DATASETS.copy()
                 ),
                 source_revision=env.str(name="SOURCE_REVISION", default=PARQUET_AND_INFO_SOURCE_REVISION),
-                supported_datasets=env.list(name="SUPPORTED_DATASETS", default=get_empty_str_list()),
                 target_revision=env.str(name="TARGET_REVISION", default=PARQUET_AND_INFO_TARGET_REVISION),
                 url_template=env.str(name="URL_TEMPLATE", default=PARQUET_AND_INFO_URL_TEMPLATE),
             )
@@ -330,6 +328,8 @@ class AppConfig:
     parquet_and_info: ParquetAndInfoConfig = field(default_factory=ParquetAndInfoConfig)
     processing_graph: ProcessingGraphConfig = field(default_factory=ProcessingGraphConfig)
     queue: QueueConfig = field(default_factory=QueueConfig)
+    rows_index: RowsIndexConfig = field(default_factory=RowsIndexConfig)
+    s3: S3Config = field(default_factory=S3Config)
     worker: WorkerConfig = field(default_factory=WorkerConfig)
     urls_scan: OptInOutUrlsScanConfig = field(default_factory=OptInOutUrlsScanConfig)
     parquet_metadata: ParquetMetadataConfig = field(default_factory=ParquetMetadataConfig)
@@ -350,9 +350,11 @@ class AppConfig:
             parquet_and_info=ParquetAndInfoConfig.from_env(),
             processing_graph=ProcessingGraphConfig.from_env(),
             queue=QueueConfig.from_env(),
+            s3=S3Config.from_env(),
             worker=WorkerConfig.from_env(),
             urls_scan=OptInOutUrlsScanConfig.from_env(),
             parquet_metadata=ParquetMetadataConfig.from_env(),
             duckdb_index=DuckDbIndexConfig.from_env(),
             descriptive_statistics=DescriptiveStatisticsConfig.from_env(),
+            rows_index=RowsIndexConfig.from_env(),
         )

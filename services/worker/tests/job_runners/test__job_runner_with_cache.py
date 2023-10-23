@@ -2,10 +2,12 @@
 # Copyright 2023 The HuggingFace Authors.
 
 import random
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 import pytest
+from libcommon.config import ProcessingGraphConfig
 from libcommon.processing_graph import ProcessingGraph
 from libcommon.resources import CacheMongoResource, QueueMongoResource
 from libcommon.utils import Priority
@@ -48,12 +50,14 @@ def get_job_runner(
     ) -> DummyJobRunner:
         processing_step_name = DummyJobRunner.get_job_type()
         processing_graph = ProcessingGraph(
-            {
-                processing_step_name: {
-                    "input_type": "dataset",
-                    "job_runner_version": DummyJobRunner.get_job_runner_version(),
+            ProcessingGraphConfig(
+                {
+                    processing_step_name: {
+                        "input_type": "dataset",
+                        "job_runner_version": DummyJobRunner.get_job_runner_version(),
+                    }
                 }
-            }
+            )
         )
         return DummyJobRunner(
             job_info={

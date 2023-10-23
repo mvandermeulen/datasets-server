@@ -7,6 +7,7 @@
   imagePullPolicy: {{ .Values.images.pullPolicy }}
   env:
   {{ include "envCachedAssets" . | nindent 2 }}
+  {{ include "envS3" . | nindent 2 }}
   {{ include "envCache" . | nindent 2 }}
   {{ include "envParquetMetadata" . | nindent 2 }}
   {{ include "envQueue" . | nindent 2 }}
@@ -29,6 +30,8 @@
     value: {{ .Values.rows.uvicornNumWorkers | quote }}
   - name: API_UVICORN_PORT
     value: {{ .Values.rows.uvicornPort | quote }}
+  - name: ROWS_INDEX_MAX_ARROW_DATA_IN_MEMORY
+    value: {{ .Values.rowsIndex.maxArrowDataInMemory | quote }}
   volumeMounts:
   {{ include "volumeMountCachedAssetsRW" . | nindent 2 }}
   {{ include "volumeMountParquetMetadataRO" . | nindent 2 }}

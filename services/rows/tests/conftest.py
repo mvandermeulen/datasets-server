@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2022 The HuggingFace Authors.
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 from libapi.config import UvicornConfig
 from libcommon.processing_graph import ProcessingGraph
@@ -45,7 +45,7 @@ def app_config(monkeypatch_session: MonkeyPatch) -> AppConfig:
 
 @fixture(scope="session")
 def processing_graph(app_config: AppConfig) -> ProcessingGraph:
-    return ProcessingGraph(app_config.processing_graph.specification)
+    return ProcessingGraph(app_config.processing_graph)
 
 
 @fixture(scope="session")

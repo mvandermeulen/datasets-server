@@ -5,22 +5,12 @@ import functools
 import logging
 import os
 import re
+from collections.abc import Callable, Generator
 from contextlib import ExitStack
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from types import TracebackType
-from typing import (
-    Any,
-    Callable,
-    Generator,
-    List,
-    Optional,
-    Set,
-    Tuple,
-    Type,
-    TypeVar,
-    Union,
-)
+from typing import Any, Optional, TypeVar, Union
 from unittest.mock import patch
 from urllib.parse import unquote
 
@@ -64,7 +54,6 @@ from libcommon.dataset import get_dataset_info_for_supported_datasets
 from libcommon.exceptions import (
     ConfigNamesError,
     CreateCommitError,
-    DatasetInBlockListError,
     DatasetManualDownloadError,
     DatasetNotFoundError,
     DatasetWithTooManyParquetFilesError,
@@ -91,6 +80,7 @@ from worker.utils import (
     HF_HUB_HTTP_ERROR_RETRY_SLEEPS,
     LOCK_GIT_BRANCH_RETRY_SLEEPS,
     create_branch,
+    disable_dataset_scripts_support,
     hf_hub_url,
     retry,
 )
@@ -140,7 +130,7 @@ class ParquetFile:
 filename_pattern = re.compile("^[0-9]{4}\\.parquet$")
 
 
-def parse_repo_filename(filename: str) -> Tuple[str, str]:
+def parse_repo_filename(filename: str) -> tuple[str, str]:
     if not filename_pattern.match(os.path.basename(filename)):
         raise ValueError(f"Cannot parse {filename}")
     parts = filename.split("/")
@@ -177,32 +167,6 @@ def create_parquet_file_item(
         "filename": Path(repo_file.rfilename).name,
         "size": repo_file.size,
     }
-
-
-def raise_if_blocked(
-    dataset: str,
-    blocked_datasets: List[str],
-) -> None:
-    """
-    Raise an error if the dataset is in the list of blocked datasets
-
-    Args:
-        dataset (`str`):
-            A namespace (user or an organization) and a repo name separated
-            by a `/`.
-        blocked_datasets (`List[str]`):
-            The list of blocked datasets. If empty, no dataset is blocked.
-    Returns:
-        `None`
-    Raises the following errors:
-        - [`libcommon.exceptions.DatasetInBlockListError`]
-          If the dataset is in the list of blocked datasets.
-    """
-    if dataset in blocked_datasets:
-        raise DatasetInBlockListError(
-            "The parquet conversion has been disabled for this dataset for now. Please open an issue in"
-            " https://github.com/huggingface/datasets-server if you want this dataset to be supported."
-        )
 
 
 def is_parquet_builder_with_hub_files(builder: DatasetBuilder) -> bool:
@@ -388,7 +352,7 @@ def _request_size(url: str, hf_token: Optional[str] = None) -> Optional[int]:
 class _MockStreamingDownloadManager(StreamingDownloadManager):  # type: ignore
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self.ext_data_files: List[str] = []
+        self.ext_data_files: list[str] = []
 
     def download(self, url_or_urls: Any) -> Any:
         url_or_urls = map_nested(
@@ -580,7 +544,7 @@ def get_writer_batch_size_from_row_group_size(
     return writer_batch_size
 
 
-def copy_parquet_files(builder: DatasetBuilder) -> List[CommitOperationCopy]:
+def copy_parquet_files(builder: DatasetBuilder) -> list[CommitOperationCopy]:
     """Copy parquet files by copying the git LFS pointer files"""
     data_files = builder.config.data_files
     if not data_files:
@@ -626,7 +590,7 @@ class TooBigRowGroupsError(ParquetValidationError):
         self.row_group_byte_size = row_group_byte_size
 
 
-def get_parquet_file_and_size(url: str, hf_endpoint: str, hf_token: Optional[str]) -> Tuple[pq.ParquetFile, int]:
+def get_parquet_file_and_size(url: str, hf_endpoint: str, hf_token: Optional[str]) -> tuple[pq.ParquetFile, int]:
     fs = HfFileSystem(endpoint=hf_endpoint, token=hf_token)
     f = fs.open(url)
     return pq.ParquetFile(f), f.size
@@ -634,7 +598,7 @@ def get_parquet_file_and_size(url: str, hf_endpoint: str, hf_token: Optional[str
 
 def retry_and_validate_get_parquet_file_and_size(
     url: str, hf_endpoint: str, hf_token: Optional[str], validate: Optional[Callable[[pq.ParquetFile], None]]
-) -> Tuple[pq.ParquetFile, int]:
+) -> tuple[pq.ParquetFile, int]:
     try:
         sleeps = [1, 1, 1, 10, 10, 10]
         pf, size = retry(on=[pa.ArrowInvalid], sleeps=sleeps)(get_parquet_file_and_size)(url, hf_endpoint, hf_token)
@@ -702,7 +666,7 @@ def fill_builder_info(
     for split in data_files:
         split = str(split)  # in case it's a NamedSplit
         try:
-            parquet_files_and_sizes: List[Tuple[pq.ParquetFile, int]] = thread_map(
+            parquet_files_and_sizes: list[tuple[pq.ParquetFile, int]] = thread_map(
                 functools.partial(
                     retry_and_validate_get_parquet_file_and_size,
                     hf_endpoint=hf_endpoint,
@@ -816,19 +780,19 @@ class limit_parquet_writes:
 
     def __exit__(
         self,
-        exc_type: Optional[Type[BaseException]],
+        exc_type: Optional[type[BaseException]],
         exc_value: Optional[BaseException],
         traceback: Optional[TracebackType],
     ) -> None:
         return self.exit_stack.close()
 
 
-def list_generated_parquet_files(builder: DatasetBuilder, partial: bool = False) -> List[ParquetFile]:
+def list_generated_parquet_files(builder: DatasetBuilder, partial: bool = False) -> list[ParquetFile]:
     """List the parquet files generated by `builder.download_and_prepare` in the `builder.cache_dir`."""
     if not builder.info.splits:
         raise EmptyDatasetError("No split found after generating parquet files")
     split_dict = builder.info.splits
-    local_parquet_files: List[ParquetFile] = []
+    local_parquet_files: list[ParquetFile] = []
     for split, split_info in split_dict.items():
         # We know the `datasets` library uses a template for the shards names:
         # - {builder.dataset_name}-{split}.parquet if there is only one shard
@@ -857,7 +821,7 @@ def list_generated_parquet_files(builder: DatasetBuilder, partial: bool = False)
 
 def stream_convert_to_parquet(
     builder: DatasetBuilder, max_dataset_size: Optional[int], writer_batch_size: Optional[int] = None
-) -> Tuple[List[CommitOperationAdd], bool]:
+) -> tuple[list[CommitOperationAdd], bool]:
     """Stream and prepare the dataset as parquet files and fills the builder info."""
     writer_batch_size = writer_batch_size or get_writer_batch_size_from_info(builder.info)
     if writer_batch_size is not None and (
@@ -896,14 +860,14 @@ def stream_convert_to_parquet(
 
     # send the files to the target revision
     local_parquet_files = list_generated_parquet_files(builder, partial=partial)
-    parquet_operations: List[CommitOperationAdd] = [
+    parquet_operations: list[CommitOperationAdd] = [
         CommitOperationAdd(path_in_repo=parquet_file.path_in_repo, path_or_fileobj=parquet_file.local_file)
         for parquet_file in local_parquet_files
     ]
     return parquet_operations, partial
 
 
-def convert_to_parquet(builder: DatasetBuilder) -> List[CommitOperationAdd]:
+def convert_to_parquet(builder: DatasetBuilder) -> list[CommitOperationAdd]:
     """Download and prepare the dataset as parquet files and fills the builder info."""
     # prepare the parquet files locally
     writer_batch_size = get_writer_batch_size_from_info(builder.info)
@@ -917,7 +881,7 @@ def convert_to_parquet(builder: DatasetBuilder) -> List[CommitOperationAdd]:
     local_parquet_files = list_generated_parquet_files(builder)
 
     # send the files to the target revision
-    parquet_operations: List[CommitOperationAdd] = [
+    parquet_operations: list[CommitOperationAdd] = [
         CommitOperationAdd(path_in_repo=parquet_file.path_in_repo, path_or_fileobj=parquet_file.local_file)
         for parquet_file in local_parquet_files
     ]
@@ -928,13 +892,13 @@ def convert_to_parquet(builder: DatasetBuilder) -> List[CommitOperationAdd]:
 def create_commits(
     hf_api: HfApi,
     repo_id: str,
-    operations: List[CommitOperation],
+    operations: list[CommitOperation],
     *,
     commit_message: str,
     revision: Optional[str] = None,
     parent_commit: Optional[str] = None,
     max_operations_per_commit: int = MAX_OPERATIONS_PER_COMMIT,
-) -> List[CommitInfo]:
+) -> list[CommitInfo]:
     """
     Creates one or several commits in the given dataset repo, deleting & uploading files as needed.
 
@@ -973,7 +937,7 @@ def create_commits(
         max_operations_per_commit (`int`, *optional*):
             The max number of operations per commit, to avoid time out errors from the Hub. Defaults to 500.
     Returns:
-        [`List[huggingface_hub.CommitInfo]`]:
+        [`list[huggingface_hub.CommitInfo]`]:
             List of [`CommitInfo`] containing information about the newly created commit (commit hash, commit
             url, pr url, commit message,...).
     Raises:
@@ -989,7 +953,7 @@ def create_commits(
         [`libcommon.exceptions.CreateCommitError`]:
             If one of the commits could not be created on the Hub.
     """
-    commit_infos: List[CommitInfo] = []
+    commit_infos: list[CommitInfo] = []
     offsets = range(0, len(operations), max_operations_per_commit)
     for commit_idx, offset in enumerate(offsets):
         batch_msg = f" (step {commit_idx + 1} of {len(offsets)})" if len(offsets) > 1 else ""
@@ -1018,8 +982,8 @@ def create_commits(
 
 
 def get_delete_operations(
-    parquet_operations: List[CommitOperationAdd], all_repo_files: Set[str], config_names: Set[str], config: str
-) -> List[CommitOperationDelete]:
+    parquet_operations: list[CommitOperationAdd], all_repo_files: set[str], config_names: set[str], config: str
+) -> list[CommitOperationDelete]:
     # - get files that will be preserved in repo:
     #   1. parquet files belonging to any other config (otherwise outdated files might be preserved)
     #   2. duckdb files belonging to any config
@@ -1028,7 +992,7 @@ def get_delete_operations(
     pattern_in_any_other_config_dir = re.compile(
         f"^({'|'.join(re.escape(conf) for conf in config_names.difference({config}))})/"
     )
-    files_to_ignore: Set[str] = {
+    files_to_ignore: set[str] = {
         file
         for file in all_repo_files
         if (pattern_in_any_other_config_dir.match(file) and file.endswith(".parquet"))
@@ -1049,11 +1013,11 @@ def commit_parquet_conversion(
     committer_hf_api: HfApi,
     dataset: str,
     config: str,
-    config_names: Set[str],
-    parquet_operations: List[CommitOperation],
+    config_names: set[str],
+    parquet_operations: list[CommitOperation],
     commit_message: str,
     target_revision: Optional[str],
-) -> List[CommitInfo]:
+) -> list[CommitInfo]:
     """
     Creates one or several commits in the given dataset repo, deleting & uploading files as needed.
 
@@ -1067,10 +1031,10 @@ def commit_parquet_conversion(
             `"username/my_dataset"`
         config (`str`):
             The dataset configuration.
-        config_names (`List[str]`):
+        config_names (`list[str]`):
             The list of all the configurations of this dataset. This is used to clean
             the other fiels and directories in the repo, if any.
-        parquet_operations (`List[huggingface_hub.hf_api.CommitOperation]`):
+        parquet_operations (`list[huggingface_hub.hf_api.CommitOperation]`):
             List of commit operation for the parquet conversion. It could be
             file additions or file copies for example.
         commit_message (`str`):
@@ -1078,7 +1042,7 @@ def commit_parquet_conversion(
         target_revision (`str`, *optional*):
             The git revision to commit from. Defaults to the head of the `"main"` branch.
     Returns:
-        [`List[huggingface_hub.CommitInfo]`]:
+        [`list[huggingface_hub.CommitInfo]`]:
             List of [`CommitInfo`] containing information about the newly created commit (commit hash, commit
             url, pr url, commit message,...).
     Raises:
@@ -1095,7 +1059,7 @@ def commit_parquet_conversion(
             If one of the commits could not be created on the Hub.
     """
     target_dataset_info = hf_api.dataset_info(repo_id=dataset, revision=target_revision, files_metadata=False)
-    all_repo_files: Set[str] = {f.rfilename for f in target_dataset_info.siblings}
+    all_repo_files: set[str] = {f.rfilename for f in target_dataset_info.siblings}
     delete_operations = get_delete_operations(
         parquet_operations=parquet_operations, all_repo_files=all_repo_files, config_names=config_names, config=config
     )
@@ -1121,12 +1085,11 @@ def compute_config_parquet_and_info_response(
     target_revision: str,
     commit_message: str,
     url_template: str,
-    supported_datasets: List[str],
-    blocked_datasets: List[str],
     max_dataset_size: int,
     max_external_data_files: int,
     max_row_group_byte_size_for_copy: int,
-    no_max_size_limit_datasets: List[str],
+    no_max_size_limit_datasets: list[str],
+    dataset_scripts_allow_list: list[str],
 ) -> ConfigParquetAndInfoResponse:
     """
     Get the response of config-parquet-and-info for one specific dataset and config on huggingface.co.
@@ -1145,20 +1108,15 @@ def compute_config_parquet_and_info_response(
             An app authentication token with read access to all the datasets.
         committer_hf_token (`str`, `optional`):
             An app authentication token with write access. It must be part of the `datasets-maintainers`
-              organization (to create the ref/convert/parquet "branch" and push to it)
+              organization (to create the refs/convert/parquet "branch" and push to it)
         source_revision (`str`):
             The git revision (e.g. "main" or sha) of the dataset used to prepare the parquet files
         target_revision (`str`):
-            The target git revision (e.g. "ref/convert/parquet") of the dataset where to store the parquet files
+            The target git revision (e.g. "refs/convert/parquet") of the dataset where to store the parquet files
         commit_message (`str`):
             The commit message to use when storing the parquet files
         url_template (`str`):
             The template to use to build the parquet file url
-        supported_datasets (`List[str]`):
-            The list of supported datasets, saving the blocked datasets. If empty, all datasets are supported
-            (saving the blocked datasets).
-        blocked_datasets (`List[str]`):
-            The list of blocked datasets. If empty, no dataset is blocked.
         max_dataset_size (`int`):
             The maximum size of a dataset in bytes. If the dataset is under the limit (which means that the size
             can be fetched), it will be allowed.
@@ -1166,8 +1124,13 @@ def compute_config_parquet_and_info_response(
             The maximum number of external data files of a dataset. This is for datasets with loading scripts only.
         max_row_group_byte_size_for_copy (`int`):
             The maximum size in bytes of parquet files that are allowed to be copied without being converted.
-        no_max_size_limit_datasets (`List[str]`):
+        no_max_size_limit_datasets (`list[str]`):
             List of datasets that should be fully converted (no partial conversion).
+        dataset_scripts_allow_list (`list[str]`):
+            List of datasets for which we support dataset scripts.
+            Unix shell-style wildcards also work in the dataset name for namespaced datasets,
+            for example `some_namespace/*` to refer to all the datasets in the `some_namespace` namespace.
+            The keyword `{{ALL_DATASETS_WITH_NO_NAMESPACE}}` refers to all the datasets without namespace.
     Returns:
         `ConfigParquetAndInfoResponse`: An object with the config_parquet_and_info_response
           (dataset info and list of parquet files).
@@ -1180,8 +1143,6 @@ def compute_config_parquet_and_info_response(
             If the previous step gave an error.
         - [`libcommon.exceptions.CreateCommitError`]:
           If one of the commits could not be created on the Hub.
-        - [`libcommon.exceptions.DatasetInBlockListError`]
-          If the dataset is in the list of blocked datasets.
         - [`libcommon.exceptions.DatasetManualDownloadError`]:
           If the dataset requires manual download.
         - [`libcommon.exceptions.DatasetRevisionNotFoundError`]
@@ -1210,14 +1171,14 @@ def compute_config_parquet_and_info_response(
             If we failed to get the external files sizes to make sure we can convert the dataset to parquet
         - [`libcommon.exceptions.ExternalFilesSizeRequestError`]
             If we failed to get the external files sizes to make sure we can convert the dataset to parquet
+        - [`libcommon.exceptions.DatasetWithScriptNotSupportedError`]
+            If the dataset has a dataset script and is not in the allow list.
         - [`libcommon.exceptions.PreviousStepFormatError`]
             If the content of the previous step has not the expected format
         - [`ValueError`](https://docs.python.org/3/library/exceptions.html#ValueError)
             If the datasets.config.HF_ENDPOINT is not set to the expected value
     """
     logging.info(f"get parquet files and dataset info for {dataset=} {config=}")
-
-    raise_if_blocked(dataset=dataset, blocked_datasets=blocked_datasets)
 
     logging.info(f"getting config names for {dataset=}")
     previous_step = "dataset-config-names"
@@ -1242,13 +1203,14 @@ def compute_config_parquet_and_info_response(
 
     download_config = DownloadConfig(delete_extracted=True)
     try:
-        builder = load_dataset_builder(
-            path=dataset,
-            name=config,
-            revision=source_revision,
-            token=hf_token,
-            download_config=download_config,
-        )
+        with disable_dataset_scripts_support(allow_list=dataset_scripts_allow_list):
+            builder = load_dataset_builder(
+                path=dataset,
+                name=config,
+                revision=source_revision,
+                token=hf_token,
+                download_config=download_config,
+            )
     except _EmptyDatasetError as err:
         raise EmptyDatasetError(f"{dataset=} is empty.", cause=err) from err
     except FileNotFoundError as err:
@@ -1394,11 +1356,10 @@ class ConfigParquetAndInfoJobRunner(ConfigJobRunnerWithDatasetsCache):
                 target_revision=self.parquet_and_info_config.target_revision,
                 commit_message=self.parquet_and_info_config.commit_message,
                 url_template=self.parquet_and_info_config.url_template,
-                supported_datasets=self.parquet_and_info_config.supported_datasets,
-                blocked_datasets=self.parquet_and_info_config.blocked_datasets,
                 max_dataset_size=self.parquet_and_info_config.max_dataset_size,
                 max_external_data_files=self.parquet_and_info_config.max_external_data_files,
                 max_row_group_byte_size_for_copy=self.parquet_and_info_config.max_row_group_byte_size_for_copy,
                 no_max_size_limit_datasets=self.parquet_and_info_config.no_max_size_limit_datasets,
+                dataset_scripts_allow_list=self.app_config.common.dataset_scripts_allow_list,
             )
         )

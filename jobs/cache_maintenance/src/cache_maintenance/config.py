@@ -2,7 +2,7 @@
 # Copyright 2022 The HuggingFace Authors.
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 from environs import Env
 from libcommon.config import (
@@ -18,7 +18,7 @@ CACHE_MAINTENANCE_BACKFILL_ERROR_CODES_TO_RETRY = None
 
 @dataclass(frozen=True)
 class BackfillConfig:
-    error_codes_to_retry: Optional[List[str]] = CACHE_MAINTENANCE_BACKFILL_ERROR_CODES_TO_RETRY
+    error_codes_to_retry: Optional[list[str]] = CACHE_MAINTENANCE_BACKFILL_ERROR_CODES_TO_RETRY
 
     @classmethod
     def from_env(cls) -> "BackfillConfig":
@@ -29,30 +29,51 @@ class BackfillConfig:
         )
 
 
-DUCKDB_INDEX_CACHE_DIRECTORY = None
-DUCKDB_INDEX_SUBDIRECTORY = "downloads"
-DUCKDB_INDEX_EXPIRED_TIME_INTERVAL_SECONDS = 10 * 60  # 10 minutes
-DUCKDB_INDEX_FILE_EXTENSION = ".duckdb"
+DISCUSSIONS_BOT_ASSOCIATED_USER_NAME = None
+DISCUSSIONS_BOT_TOKEN = None
+DISCUSSIONS_PARQUET_REVISION = "refs/convert/parquet"
 
 
 @dataclass(frozen=True)
-class DuckDbConfig:
-    cache_directory: Optional[str] = DUCKDB_INDEX_CACHE_DIRECTORY
-    subdirectory: str = DUCKDB_INDEX_SUBDIRECTORY
-    expired_time_interval_seconds: int = DUCKDB_INDEX_EXPIRED_TIME_INTERVAL_SECONDS
-    file_extension: str = DUCKDB_INDEX_FILE_EXTENSION
+class DiscussionsConfig:
+    bot_associated_user_name: Optional[str] = DISCUSSIONS_BOT_ASSOCIATED_USER_NAME
+    bot_token: Optional[str] = DISCUSSIONS_BOT_TOKEN
+    parquet_revision: str = DISCUSSIONS_PARQUET_REVISION
 
     @classmethod
-    def from_env(cls) -> "DuckDbConfig":
+    def from_env(cls) -> "DiscussionsConfig":
         env = Env(expand_vars=True)
-        with env.prefixed("DUCKDB_INDEX_"):
+        with env.prefixed("DISCUSSIONS_"):
             return cls(
-                cache_directory=env.str(name="CACHE_DIRECTORY", default=DUCKDB_INDEX_CACHE_DIRECTORY),
-                subdirectory=env.str(name="SUBDIRECTORY", default=DUCKDB_INDEX_SUBDIRECTORY),
-                expired_time_interval_seconds=env.int(
-                    name="EXPIRED_TIME_INTERVAL_SECONDS", default=DUCKDB_INDEX_EXPIRED_TIME_INTERVAL_SECONDS
+                bot_associated_user_name=env.str(
+                    name="BOT_ASSOCIATED_USER_NAME", default=DISCUSSIONS_BOT_ASSOCIATED_USER_NAME
                 ),
-                file_extension=env.str(name="FILE_EXTENSION", default=DUCKDB_INDEX_FILE_EXTENSION),
+                bot_token=env.str(name="BOT_TOKEN", default=DISCUSSIONS_BOT_TOKEN),
+                parquet_revision=env.str(name="PARQUET_REVISION", default=DISCUSSIONS_PARQUET_REVISION),
+            )
+
+
+DIRECTORY_CLEANING_CACHE_DIRECTORY = None
+DIRECTORY_CLEANING_SUBFOLDER_PATTERN = "*/datasets/*"
+DIRECTORY_CLEANING_EXPIRED_TIME_INTERVAL_SECONDS = 3 * 60 * 60  # 3 hours
+
+
+@dataclass(frozen=True)
+class DirectoryCleaning:
+    cache_directory: Optional[str] = DIRECTORY_CLEANING_CACHE_DIRECTORY
+    subfolder_pattern: str = DIRECTORY_CLEANING_SUBFOLDER_PATTERN
+    expired_time_interval_seconds: int = DIRECTORY_CLEANING_EXPIRED_TIME_INTERVAL_SECONDS
+
+    @classmethod
+    def from_env(cls) -> "DirectoryCleaning":
+        env = Env(expand_vars=True)
+        with env.prefixed("DIRECTORY_CLEANING_"):
+            return cls(
+                cache_directory=env.str(name="CACHE_DIRECTORY", default=DIRECTORY_CLEANING_CACHE_DIRECTORY),
+                subfolder_pattern=env.str(name="SUBFOLDER_PATTERN", default=DIRECTORY_CLEANING_SUBFOLDER_PATTERN),
+                expired_time_interval_seconds=env.int(
+                    name="EXPIRED_TIME_INTERVAL_SECONDS", default=DIRECTORY_CLEANING_EXPIRED_TIME_INTERVAL_SECONDS
+                ),
             )
 
 
@@ -67,7 +88,8 @@ class JobConfig:
     common: CommonConfig = field(default_factory=CommonConfig)
     graph: ProcessingGraphConfig = field(default_factory=ProcessingGraphConfig)
     backfill: BackfillConfig = field(default_factory=BackfillConfig)
-    duckdb: DuckDbConfig = field(default_factory=DuckDbConfig)
+    directory_cleaning: DirectoryCleaning = field(default_factory=DirectoryCleaning)
+    discussions: DiscussionsConfig = field(default_factory=DiscussionsConfig)
     action: Optional[str] = CACHE_MAINTENANCE_ACTION
 
     @classmethod
@@ -81,6 +103,7 @@ class JobConfig:
             common=CommonConfig.from_env(),
             graph=ProcessingGraphConfig.from_env(),
             backfill=BackfillConfig.from_env(),
-            duckdb=DuckDbConfig.from_env(),
+            directory_cleaning=DirectoryCleaning.from_env(),
+            discussions=DiscussionsConfig.from_env(),
             action=env.str(name="CACHE_MAINTENANCE_ACTION", default=CACHE_MAINTENANCE_ACTION),
         )

@@ -70,7 +70,6 @@ Also, set the assets-related configuration for the first-rows worker. See [../..
 
 Set environment variables to configure the `parquet-and-info` worker (`PARQUET_AND_INFO_` prefix):
 
-- `PARQUET_AND_INFO_BLOCKED_DATASETS`: comma-separated list of the blocked datasets. If empty, no dataset is blocked. Defaults to empty.
 - `PARQUET_AND_INFO_COMMIT_MESSAGE`: the git commit message when the worker uploads the parquet files to the Hub. Defaults to `Update parquet files`.
 - `PARQUET_AND_INFO_COMMITTER_HF_TOKEN`: the HuggingFace token to commit the parquet files to the Hub. The token must be an app token associated with a user that has the right to 1. create the `refs/convert/parquet` branch (see `PARQUET_AND_INFO_TARGET_REVISION`) and 2. push commits to it on any dataset. [Datasets maintainers](https://huggingface.co/datasets-maintainers) members have these rights. The token must have permission to write. If not set, the worker will fail. Defaults to None.
 - `PARQUET_AND_INFO_NO_MAX_SIZE_LIMIT_DATASETS`: comma-separated list of datasets that are fully converted to parquet (no partial conversion). Defaults to `""`.
@@ -78,7 +77,6 @@ Set environment variables to configure the `parquet-and-info` worker (`PARQUET_A
 - `PARQUET_AND_INFO_MAX_EXTERNAL_DATA_FILES`: the maximum number of external files of the datasets. Bigger datasets, or datasets without that information, are partially streamed to get parquet files up to `PARQUET_AND_INFO_MAX_DATASET_SIZE` bytes. Defaults to `10_000`.
 - `PARQUET_AND_INFO_MAX_ROW_GROUP_BYTE_SIZE_FOR_COPY`: the maximum size in bytes of the row groups of parquet datasets that are copied to the target revision. Bigger datasets, or datasets without that information, are partially streamed to get parquet files up to `PARQUET_AND_INFO_MAX_DATASET_SIZE` bytes. Defaults to `100_000_000`.
 - `PARQUET_AND_INFO_SOURCE_REVISION`: the git revision of the dataset to use to prepare the parquet files. Defaults to `main`.
-- `PARQUET_AND_INFO_SUPPORTED_DATASETS`: comma-separated list of the supported datasets. The worker does not test the size of supported datasets against the maximum dataset size. Defaults to empty.
 - `PARQUET_AND_INFO_TARGET_REVISION`: the git revision of the dataset where to store the parquet files. Make sure the committer token (`PARQUET_AND_INFO_COMMITTER_HF_TOKEN`) has the permission to write there. Defaults to `refs/convert/parquet`.
 - `PARQUET_AND_INFO_URL_TEMPLATE`: the URL template to build the parquet file URLs. Defaults to `/datasets/%s/resolve/%s/%s`.
 
@@ -104,8 +102,16 @@ Set environment variables to configure the `descriptive-statistics` worker (`DES
 
 #### How descriptive statistics are computed 
 
-Descriptive statistics are currently computed for three types of data: categories (`ClassLabel` feature of the `datasets` library), `float` numbers and `int` numbers.
-Response has two fields: `num_examples` and `statistics`. `statistics` field is a list of dicts with three keys: `column_name`, `column_type` (has three values: `class_label`, `float` or `int`), and `column_statistics`.
+Descriptive statistics are currently computed for the following data types: strings, floats, and ints (including `ClassLabel` int). 
+Response has two fields: `num_examples` and `statistics`. `statistics` field is a list of dicts with three keys: `column_name`, `column_type`, and `column_statistics`.
+
+`column_type` is one of the following values:
+* `class_label` - for `datasets.ClassLabel` feature
+* `float` - for float dtypes ("float16", "float32", "float64")
+* `int` - for integer dtypes ("int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64")
+* `string_label` - for string dtypes ("string", "large_string") - if there are less than or equal to `MAX_NUM_STRING_LABELS` unique values (hardcoded in worker's code, for now it's 30)
+* `string_text` - for string dtypes ("string", "large_string") - if there are more than `MAX_NUM_STRING_LABELS` unique values
+
 `column_statistics` content depends on the feature type. 
 ##### class_label
 
@@ -119,7 +125,9 @@ Response has two fields: `num_examples` and `statistics`. `statistics` field is 
     "column_statistics": {
         "nan_count": 0,
         "nan_proportion": 0.0,
-        "n_unique": 5,  # number of unique values
+        "no_label_count": 0,  # number of -1 values - special value of the `datasets` lib to encode `no label` 
+        "no_label_proportion": 0.0,
+        "n_unique": 5,  # number of unique values (excluding `no label` and nan)
         "frequencies": {   # mapping value -> its count
             "this": 19834,
             "are": 20159,
@@ -331,6 +339,88 @@ As bin edges for integer values also must be integers, bin size is counted as `n
 
 </p>
 </details>
+
+##### string_label
+
+If the number of unique values in a column (within requested split) is <= `MAX_NUM_STRING_LABELS` (currently 30), the column is considered to be a category and the categories counts are computed.
+
+<details><summary>examples: </summary>
+<p>
+
+```python
+{
+    'column_name': 'string_col',
+    'column_type': 'string_label',
+    'column_statistics': 
+        {
+            "nan_count": 0,
+            "nan_proportion": 0.0,
+            "n_unique": 5,  # number of unique values (excluding nan)
+            "frequencies": {   # mapping value -> its count
+                "this": 19834,
+                "are": 20159,
+                "random": 20109,
+                "words": 20172,
+                "test": 19726
+        }
+    }
+}
+```
+</p>
+</details>
+
+##### string_text
+
+If the number of unique values in a column (within requested split) is > `MAX_NUM_STRING_LABELS` (currently 30), the column is considered to be text and the distribution of text **lengths** is computed.
+
+<details><summary>example: </summary>
+<p>
+
+```python
+{
+    'column_name': 'text_col',
+    'column_type': 'string_text',
+    'column_statistics': {
+        'max': 296,
+        'mean': 97.46649,
+        'median': 88.0,
+        'min': 11,
+        'nan_count': 0,
+        'nan_proportion': 0.0,
+        'std': 55.82714,
+        'histogram': {
+            'bin_edges': [
+                11,
+                40,
+                69,
+                98,
+                127,
+                156,
+                185,
+                214,
+                243,
+                272,
+                296
+            ],
+            'hist': [
+                171,
+                224,
+                235,
+                180,
+                102,
+                99,
+                53,
+                28,
+                10,
+                2
+               ]
+             },
+    }
+}
+```
+</p>
+</details>
+
 
 ### Splits worker
 

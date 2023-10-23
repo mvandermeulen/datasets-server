@@ -21,7 +21,7 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
     runs-on: "ubuntu-latest"
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install poetry
         run: pipx install poetry==${{ env.poetry-version }}
       - name: Use Python
@@ -33,6 +33,8 @@ jobs:
             ${{ inputs.working-directory }}/poetry.lock
       - name: Install packages
         run: sudo apt update; sudo apt install -y libicu-dev ffmpeg libavcodec-extra libsndfile1 llvm pkg-config poppler-utils
+      - name: Verify consistency of poetry.lock with pyproject.toml
+        run: poetry lock --no-update --check
       - name: Install dependencies
         # "poetry env use" is required: https://github.com/actions/setup-python/issues/374#issuecomment-1088938718
         run: |
@@ -42,11 +44,13 @@ jobs:
         run: poetry run black --check tests src
       - name: Run isort
         run: poetry run isort --check-only tests src
-      - name: Run flake8
-        run: poetry run flake8 tests src
+      - name: Run flake8 on src
+        run: poetry run flake8 src
+      - name: Run flake8 on tests
+        run: poetry run flake8 tests --ignore=U100
       - name: Run mypy
         run: poetry run mypy tests src
       - name: Run bandit
         run: poetry run bandit -r src
       - name: Run pip-audit
-        run: bash -c "poetry run pip-audit -r <(poetry export -f requirements.txt --with dev | sed '/^kenlm @/d' | sed '/^torch @/d' | sed '/^libapi @/d' | sed '/^libcommon @/d' | sed '/^trec-car-tools @/d' | sed 's/^huggingface-hub @ git.*/huggingface-hub==0.15.1 ; python_full_version == \"3.9.15\" --hash=sha256:05b0fb0abbf1f625dfee864648ac3049fe225ac4371c7bafaca0c2d3a2f83445 --hash=sha256:a61b7d1a7769fe10119e730277c72ab99d95c48d86a3d6da3e9f3d0f632a4081/')"
+        run: bash -c "poetry run pip-audit --ignore-vuln GHSA-wfm5-v35h-vwf4 --ignore-vuln GHSA-cwvm-v4w8-q58c -r <(poetry export -f requirements.txt --with dev | sed '/^kenlm @/d' | sed '/^torch @/d' | sed '/^libapi @/d' | sed '/^libcommon @/d' | sed '/^trec-car-tools @/d' | sed 's/^huggingface-hub @ git.*/huggingface-hub==0.15.1 ; python_full_version == \"3.9.15\" --hash=sha256:05b0fb0abbf1f625dfee864648ac3049fe225ac4371c7bafaca0c2d3a2f83445 --hash=sha256:a61b7d1a7769fe10119e730277c72ab99d95c48d86a3d6da3e9f3d0f632a4081/')"

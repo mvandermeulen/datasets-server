@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2023 The HuggingFace Authors.
 
+from collections.abc import Callable
 from http import HTTPStatus
-from typing import Any, Callable, List
+from typing import Any
 
 import pytest
 from libcommon.processing_graph import ProcessingGraph
@@ -13,7 +14,7 @@ from libcommon.utils import Priority
 from worker.config import AppConfig
 from worker.job_runners.split.is_valid import SplitIsValidJobRunner
 
-from ..utils import UpstreamResponse
+from ..utils import REVISION_NAME, UpstreamResponse
 
 
 @pytest.fixture(autouse=True)
@@ -29,11 +30,17 @@ CONFIG = "config"
 SPLIT = "split"
 
 UPSTREAM_RESPONSE_CONFIG_SIZE: UpstreamResponse = UpstreamResponse(
-    kind="config-size", dataset=DATASET, config=CONFIG, http_status=HTTPStatus.OK, content={}
+    kind="config-size",
+    dataset=DATASET,
+    dataset_git_revision=REVISION_NAME,
+    config=CONFIG,
+    http_status=HTTPStatus.OK,
+    content={},
 )
 UPSTREAM_RESPONSE_SPLIT_FIRST_ROWS_FROM_PARQUET: UpstreamResponse = UpstreamResponse(
     kind="split-first-rows-from-parquet",
     dataset=DATASET,
+    dataset_git_revision=REVISION_NAME,
     config=CONFIG,
     split=SPLIT,
     http_status=HTTPStatus.OK,
@@ -42,6 +49,7 @@ UPSTREAM_RESPONSE_SPLIT_FIRST_ROWS_FROM_PARQUET: UpstreamResponse = UpstreamResp
 UPSTREAM_RESPONSE_SPLIT_FIRST_ROWS_FROM_STREAMING: UpstreamResponse = UpstreamResponse(
     kind="split-first-rows-from-streaming",
     dataset=DATASET,
+    dataset_git_revision=REVISION_NAME,
     config=CONFIG,
     split=SPLIT,
     http_status=HTTPStatus.OK,
@@ -50,17 +58,33 @@ UPSTREAM_RESPONSE_SPLIT_FIRST_ROWS_FROM_STREAMING: UpstreamResponse = UpstreamRe
 UPSTREAM_RESPONSE_SPLIT_DUCKDB_INDEX: UpstreamResponse = UpstreamResponse(
     kind="split-duckdb-index",
     dataset=DATASET,
+    dataset_git_revision=REVISION_NAME,
     config=CONFIG,
     split=SPLIT,
     http_status=HTTPStatus.OK,
-    content={},
+    content={"has_fts": True},
+)
+UPSTREAM_RESPONSE_SPLIT_DUCKDB_INDEX_ONLY_DATA: UpstreamResponse = UpstreamResponse(
+    kind="split-duckdb-index",
+    dataset=DATASET,
+    dataset_git_revision=REVISION_NAME,
+    config=CONFIG,
+    split=SPLIT,
+    http_status=HTTPStatus.OK,
+    content={"has_fts": False},
 )
 UPSTREAM_RESPONSE_CONFIG_SIZE_ERROR: UpstreamResponse = UpstreamResponse(
-    kind="config-size", dataset=DATASET, config=CONFIG, http_status=HTTPStatus.INTERNAL_SERVER_ERROR, content={}
+    kind="config-size",
+    dataset=DATASET,
+    dataset_git_revision=REVISION_NAME,
+    config=CONFIG,
+    http_status=HTTPStatus.INTERNAL_SERVER_ERROR,
+    content={},
 )
 UPSTREAM_RESPONSE_SPLIT_FIRST_ROWS_FROM_PARQUET_ERROR: UpstreamResponse = UpstreamResponse(
     kind="split-first-rows-from-parquet",
     dataset=DATASET,
+    dataset_git_revision=REVISION_NAME,
     config=CONFIG,
     split=SPLIT,
     http_status=HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -69,6 +93,7 @@ UPSTREAM_RESPONSE_SPLIT_FIRST_ROWS_FROM_PARQUET_ERROR: UpstreamResponse = Upstre
 UPSTREAM_RESPONSE_SPLIT_FIRST_ROWS_FROM_STREAMING_ERROR: UpstreamResponse = UpstreamResponse(
     kind="split-first-rows-from-streaming",
     dataset=DATASET,
+    dataset_git_revision=REVISION_NAME,
     config=CONFIG,
     split=SPLIT,
     http_status=HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -77,6 +102,7 @@ UPSTREAM_RESPONSE_SPLIT_FIRST_ROWS_FROM_STREAMING_ERROR: UpstreamResponse = Upst
 UPSTREAM_RESPONSE_SPLIT_DUCKDB_INDEX_ERROR: UpstreamResponse = UpstreamResponse(
     kind="split-duckdb-index",
     dataset=DATASET,
+    dataset_git_revision=REVISION_NAME,
     config=CONFIG,
     split=SPLIT,
     http_status=HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -116,7 +142,25 @@ def get_job_runner(
         app_config: AppConfig,
     ) -> SplitIsValidJobRunner:
         processing_step_name = SplitIsValidJobRunner.get_job_type()
-        processing_graph = ProcessingGraph(app_config.processing_graph.specification)
+        processing_graph = ProcessingGraph(app_config.processing_graph)
+
+        upsert_response(
+            kind="dataset-config-names",
+            dataset=dataset,
+            dataset_git_revision=REVISION_NAME,
+            content={"config_names": [{"dataset": dataset, "config": config}]},
+            http_status=HTTPStatus.OK,
+        )
+
+        upsert_response(
+            kind="config-split-names-from-streaming",
+            dataset=dataset,
+            dataset_git_revision=REVISION_NAME,
+            config=config,
+            content={"splits": [{"dataset": dataset, "config": config, "split": split}]},
+            http_status=HTTPStatus.OK,
+        )
+
         return SplitIsValidJobRunner(
             job_info={
                 "type": SplitIsValidJobRunner.get_job_type(),
@@ -124,7 +168,7 @@ def get_job_runner(
                     "dataset": dataset,
                     "config": config,
                     "split": split,
-                    "revision": "revision",
+                    "revision": REVISION_NAME,
                 },
                 "job_id": "job_id",
                 "priority": Priority.NORMAL,
@@ -196,6 +240,12 @@ def get_job_runner(
         ),
         (
             [
+                UPSTREAM_RESPONSE_SPLIT_DUCKDB_INDEX_ONLY_DATA,
+            ],
+            EXPECTED_ERROR,
+        ),
+        (
+            [
                 UPSTREAM_RESPONSE_CONFIG_SIZE_ERROR,
                 UPSTREAM_RESPONSE_SPLIT_FIRST_ROWS_FROM_PARQUET_ERROR,
                 UPSTREAM_RESPONSE_SPLIT_FIRST_ROWS_FROM_STREAMING_ERROR,
@@ -212,7 +262,7 @@ def get_job_runner(
 def test_compute(
     app_config: AppConfig,
     get_job_runner: GetJobRunner,
-    upstream_responses: List[UpstreamResponse],
+    upstream_responses: list[UpstreamResponse],
     expected: Any,
 ) -> None:
     dataset, config, split = DATASET, CONFIG, SPLIT

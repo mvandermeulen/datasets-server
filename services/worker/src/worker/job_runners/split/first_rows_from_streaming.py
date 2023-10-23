@@ -3,7 +3,7 @@
 
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from datasets import (
     Audio,
@@ -25,7 +25,9 @@ from libcommon.exceptions import (
     TooManyColumnsError,
 )
 from libcommon.processing_graph import ProcessingStep
+from libcommon.s3_client import S3Client
 from libcommon.storage import StrPath
+from libcommon.storage_options import S3StorageOptions
 from libcommon.utils import JobInfo, Row
 from libcommon.viewer_utils.features import get_cell_value, to_features_list
 
@@ -33,8 +35,8 @@ from worker.config import AppConfig, FirstRowsConfig
 from worker.dtos import CompleteJobResult, JobRunnerInfo, SplitFirstRowsResponse
 from worker.job_runners.split.split_job_runner import SplitJobRunnerWithDatasetsCache
 from worker.utils import (
-    check_split_exists,
     create_truncated_row_items,
+    disable_dataset_scripts_support,
     get_json_size,
     get_rows_or_raise,
 )
@@ -42,25 +44,25 @@ from worker.utils import (
 
 def transform_rows(
     dataset: str,
+    revision: str,
     config: str,
     split: str,
-    rows: List[Row],
+    rows: list[Row],
     features: Features,
-    assets_base_url: str,
-    assets_directory: StrPath,
-) -> List[Row]:
+    storage_options: S3StorageOptions,
+) -> list[Row]:
     return [
         {
             featureName: get_cell_value(
                 dataset=dataset,
+                revision=revision,
                 config=config,
                 split=split,
                 row_idx=row_idx,
                 cell=row[featureName] if featureName in row else None,
                 featureName=featureName,
                 fieldType=fieldType,
-                assets_base_url=assets_base_url,
-                assets_directory=assets_directory,
+                storage_options=storage_options,
             )
             for (featureName, fieldType) in features.items()
         }
@@ -70,16 +72,17 @@ def transform_rows(
 
 def compute_first_rows_response(
     dataset: str,
+    revision: str,
     config: str,
     split: str,
-    assets_base_url: str,
+    storage_options: S3StorageOptions,
     hf_token: Optional[str],
     min_cell_bytes: int,
     rows_max_bytes: int,
     rows_max_number: int,
     rows_min_number: int,
     columns_max_number: int,
-    assets_directory: StrPath,
+    dataset_scripts_allow_list: list[str],
     max_size_fallback: Optional[int] = None,
 ) -> SplitFirstRowsResponse:
     """
@@ -96,8 +99,8 @@ def compute_first_rows_response(
             A configuration name.
         split (`str`):
             A split name.
-        assets_base_url (`str`):
-            The base url of the assets.
+        storage_options (`S3StorageOptions`):
+            The storage options that contains the assets_base_url and assets_directory.
         hf_endpoint (`str`):
             The Hub endpoint (for example: "https://huggingface.co")
         hf_token (`str` or `None`):
@@ -113,8 +116,11 @@ def compute_first_rows_response(
             The minimum number of rows of the response.
         columns_max_number (`int`):
             The maximum number of columns supported.
-        assets_directory (`str` or `pathlib.Path`):
-            The directory where the assets are stored.
+        dataset_scripts_allow_list (`list[str]`):
+            List of datasets for which we support dataset scripts.
+            Unix shell-style wildcards also work in the dataset name for namespaced datasets,
+            for example `some_namespace/*` to refer to all the datasets in the `some_namespace` namespace.
+            The keyword `{{ALL_DATASETS_WITH_NO_NAMESPACE}}` refers to all the datasets without namespace.
     Returns:
         [`SplitFirstRowsResponse`]: The list of first rows of the split.
     Raises the following errors:
@@ -138,17 +144,18 @@ def compute_first_rows_response(
           If the split rows could not be obtained using the datasets library in streaming mode.
         - [`libcommon.exceptions.NormalRowsError`]
           If the split rows could not be obtained using the datasets library in normal mode.
+        - [`libcommon.exceptions.DatasetWithScriptNotSupportedError`]
+            If the dataset has a dataset script and is not in the allow list.
     """
     logging.info(f"get first-rows for dataset={dataset} config={config} split={split}")
-    # first ensure the tuple (dataset, config, split) exists on the Hub
-    check_split_exists(dataset=dataset, config=config, split=split)
     # get the features
     try:
-        info = get_dataset_config_info(
-            path=dataset,
-            config_name=config,
-            token=hf_token,
-        )
+        with disable_dataset_scripts_support(dataset_scripts_allow_list):
+            info = get_dataset_config_info(
+                path=dataset,
+                config_name=config,
+                token=hf_token,
+            )
     except Exception as err:
         raise InfoError(
             f"The info cannot be fetched for the config '{config}' of the dataset.",
@@ -157,13 +164,14 @@ def compute_first_rows_response(
     if not info.features:
         try:
             # https://github.com/huggingface/datasets/blob/f5826eff9b06ab10dba1adfa52543341ef1e6009/src/datasets/iterable_dataset.py#L1255
-            iterable_dataset = load_dataset(
-                path=dataset,
-                name=config,
-                split=split,
-                streaming=True,
-                token=hf_token,
-            )
+            with disable_dataset_scripts_support(dataset_scripts_allow_list):
+                iterable_dataset = load_dataset(
+                    path=dataset,
+                    name=config,
+                    split=split,
+                    streaming=True,
+                    token=hf_token,
+                )
             if not isinstance(iterable_dataset, IterableDataset):
                 raise TypeError("load_dataset should return an IterableDataset.")
             iterable_dataset = iterable_dataset._resolve_features()
@@ -196,6 +204,7 @@ def compute_first_rows_response(
         "split": split,
         "features": features_list,
         "rows": [],
+        "truncated": False,
     }
 
     surrounding_json_size = get_json_size(response_features_only)
@@ -206,27 +215,29 @@ def compute_first_rows_response(
         )
 
     # get the rows
-    rows_content = get_rows_or_raise(
-        dataset=dataset,
-        config=config,
-        split=split,
-        info=info,
-        max_size_fallback=max_size_fallback,
-        rows_max_number=rows_max_number,
-        token=hf_token,
-    )
+    with disable_dataset_scripts_support(dataset_scripts_allow_list):
+        rows_content = get_rows_or_raise(
+            dataset=dataset,
+            config=config,
+            split=split,
+            info=info,
+            max_size_fallback=max_size_fallback,
+            rows_max_number=rows_max_number,
+            token=hf_token,
+        )
     rows = rows_content["rows"]
+    all_fetched = rows_content["all_fetched"]
 
     # transform the rows, if needed (e.g. save the images or audio to the assets, and return their URL)
     try:
         transformed_rows = transform_rows(
             dataset=dataset,
+            revision=revision,
             config=config,
             split=split,
             rows=rows,
             features=features,
-            assets_base_url=assets_base_url,
-            assets_directory=assets_directory,
+            storage_options=storage_options,
         )
     except Exception as err:
         raise RowsPostProcessingError(
@@ -236,7 +247,7 @@ def compute_first_rows_response(
 
     # truncate the rows to fit within the restrictions, and prepare them as RowItems
     columns_to_keep_untruncated = [col for col, feature in features.items() if isinstance(feature, (Image, Audio))]
-    row_items = create_truncated_row_items(
+    row_items, truncated = create_truncated_row_items(
         rows=transformed_rows,
         min_cell_bytes=min_cell_bytes,
         rows_max_bytes=rows_max_bytes - surrounding_json_size,
@@ -246,6 +257,7 @@ def compute_first_rows_response(
 
     response = response_features_only
     response["rows"] = row_items
+    response["truncated"] = (not all_fetched) or truncated
 
     # return the response
     return response
@@ -277,6 +289,7 @@ class SplitFirstRowsFromStreamingJobRunner(SplitJobRunnerWithDatasetsCache):
         processing_step: ProcessingStep,
         hf_datasets_cache: Path,
         assets_directory: StrPath,
+        s3_client: S3Client,
     ) -> None:
         super().__init__(
             job_info=job_info,
@@ -287,20 +300,28 @@ class SplitFirstRowsFromStreamingJobRunner(SplitJobRunnerWithDatasetsCache):
         self.first_rows_config = app_config.first_rows
         self.assets_directory = assets_directory
         self.assets_base_url = app_config.assets.base_url
+        self.storage_options = S3StorageOptions(
+            assets_base_url=self.assets_base_url,
+            assets_directory=self.assets_directory,
+            overwrite=True,
+            s3_client=s3_client,
+            s3_folder_name=app_config.assets.s3_folder_name,
+        )
 
     def compute(self) -> CompleteJobResult:
         return CompleteJobResult(
             compute_first_rows_response(
                 dataset=self.dataset,
+                revision=self.dataset_git_revision,
                 config=self.config,
                 split=self.split,
-                assets_base_url=self.assets_base_url,
-                assets_directory=self.assets_directory,
+                storage_options=self.storage_options,
                 hf_token=self.app_config.common.hf_token,
                 min_cell_bytes=self.first_rows_config.min_cell_bytes,
                 rows_max_bytes=self.first_rows_config.max_bytes,
                 rows_max_number=self.first_rows_config.max_number,
                 rows_min_number=self.first_rows_config.min_number,
                 columns_max_number=self.first_rows_config.columns_max_number,
+                dataset_scripts_allow_list=self.app_config.common.dataset_scripts_allow_list,
             )
         )

@@ -4,8 +4,9 @@
 import json
 import os
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Optional
 
 import requests
 from requests import Response
@@ -28,14 +29,10 @@ Headers = Mapping[str, str]
 
 
 def get(relative_url: str, headers: Optional[Headers] = None, url: str = URL) -> Response:
-    if headers is None:
-        headers = {}
     return requests.get(f"{url}{relative_url}", headers=headers)
 
 
 def post(relative_url: str, json: Optional[Any] = None, headers: Optional[Headers] = None, url: str = URL) -> Response:
-    if headers is None:
-        headers = {}
     return requests.post(f"{url}{relative_url}", json=json, headers=headers)
 
 
@@ -46,8 +43,6 @@ def poll(
     headers: Optional[Headers] = None,
     url: str = URL,
 ) -> Response:
-    if headers is None:
-        headers = {}
     interval = INTERVAL
     timeout = MAX_DURATION
     retries = timeout // interval
@@ -116,7 +111,7 @@ def get_openapi_body_example(path: str, status: int, example_name: str) -> Any:
     return result
 
 
-def get_default_config_split() -> Tuple[str, str]:
+def get_default_config_split() -> tuple[str, str]:
     config = "default"
     split = "train"
     return config, split
@@ -154,14 +149,12 @@ def log(response: Response, url: str = URL, relative_url: Optional[str] = None, 
 
 def poll_until_ready_and_assert(
     relative_url: str,
-    expected_status_code: int,
-    expected_error_code: Optional[str],
+    expected_status_code: int = 200,
+    expected_error_code: Optional[str] = None,
     headers: Optional[Headers] = None,
     url: str = URL,
     check_x_revision: bool = False,
 ) -> Any:
-    if headers is None:
-        headers = {}
     interval = INTERVAL
     timeout = MAX_DURATION
     retries = timeout // interval

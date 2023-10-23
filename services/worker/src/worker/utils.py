@@ -4,31 +4,31 @@
 import functools
 import itertools
 import logging
+import sys
 import time
+import traceback
 import warnings
-from typing import (
-    Any,
-    Callable,
-    List,
-    Optional,
-    Sequence,
-    Tuple,
-    Type,
-    TypeVar,
-    Union,
-    cast,
-)
+from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager
+from fnmatch import fnmatch
+from typing import Any, Optional, TypeVar, Union, cast
+from unittest.mock import patch
 from urllib.parse import quote
 
+import datasets
 import PIL
 import requests
 from datasets import Dataset, DatasetInfo, DownloadConfig, IterableDataset, load_dataset
+from datasets.load import HubDatasetModuleFactoryWithScript
 from datasets.utils.file_utils import get_authentication_headers_for_url
 from fsspec.implementations.http import HTTPFileSystem
 from huggingface_hub.hf_api import HfApi
 from huggingface_hub.utils._errors import RepositoryNotFoundError
+from libcommon.constants import EXTERNAL_DATASET_SCRIPT_PATTERN
 from libcommon.exceptions import (
+    ConfigNotFoundError,
     DatasetNotFoundError,
+    DatasetWithScriptNotSupportedError,
     NormalRowsError,
     PreviousStepFormatError,
     SplitNotFoundError,
@@ -75,7 +75,7 @@ def utf8_byte_truncate(text: str, max_bytes: int) -> str:
 
 
 # Mutates row_item, and returns it anyway
-def truncate_row_item(row_item: RowItem, min_cell_bytes: int, columns_to_keep_untruncated: List[str]) -> RowItem:
+def truncate_row_item(row_item: RowItem, min_cell_bytes: int, columns_to_keep_untruncated: list[str]) -> RowItem:
     row = {}
     for column_name, cell in row_item["row"].items():
         # for now: all the cells above min_cell_bytes are truncated to min_cell_bytes
@@ -99,8 +99,8 @@ COMMA_SIZE = 1  # the comma "," is encoded with one byte in utf-8
 
 # Mutates row_items, and returns them anyway
 def truncate_row_items(
-    row_items: List[RowItem], min_cell_bytes: int, rows_max_bytes: int, columns_to_keep_untruncated: List[str]
-) -> List[RowItem]:
+    row_items: list[RowItem], min_cell_bytes: int, rows_max_bytes: int, columns_to_keep_untruncated: list[str]
+) -> list[RowItem]:
     # compute the current size
     rows_bytes = sum(get_json_size(row_item) for row_item in row_items) + COMMA_SIZE * (len(row_items) - 1)
 
@@ -126,12 +126,12 @@ def to_row_item(row_idx: int, row: Row) -> RowItem:
 
 
 def create_truncated_row_items(
-    rows: List[Row],
+    rows: list[Row],
     min_cell_bytes: int,
     rows_max_bytes: int,
     rows_min_number: int,
-    columns_to_keep_untruncated: List[str],
-) -> List[RowItem]:
+    columns_to_keep_untruncated: list[str],
+) -> tuple[list[RowItem], bool]:
     row_items = []
     rows_bytes = 0
 
@@ -156,12 +156,13 @@ def create_truncated_row_items(
         #     f"the size of the first {rows_min_number} rows ({rows_bytes}) is above the max number of bytes"
         #     f" ({rows_max_bytes}), they will be truncated"
         # )
-        return truncate_row_items(
+        truncated_row_items = truncate_row_items(
             row_items=row_items,
             min_cell_bytes=min_cell_bytes,
             rows_max_bytes=rows_max_bytes,
             columns_to_keep_untruncated=columns_to_keep_untruncated,
         )
+        return truncated_row_items, len(truncated_row_items) < len(rows)
 
     # 3. else: add the remaining rows until the end, or until the bytes threshold
     for idx, row in enumerate(rows[rows_min_number:]):
@@ -175,18 +176,18 @@ def create_truncated_row_items(
             # )
             break
         row_items.append(row_item)
-    return row_items
+    return row_items, len(row_items) < len(rows)
 
 
 FuncT = TypeVar("FuncT", bound=Callable[..., Any])
 RETRY_SLEEPS = (1, 1, 1, 10, 10, 10, 60, 60, 60, 10 * 60)
-RETRY_ON: Tuple[Type[Exception]] = (Exception,)
+RETRY_ON: tuple[type[Exception]] = (Exception,)
 
 
 class retry:
     """retries with an increasing sleep before every attempt"""
 
-    def __init__(self, sleeps: Sequence[int] = RETRY_SLEEPS, on: Sequence[Type[Exception]] = RETRY_ON) -> None:
+    def __init__(self, sleeps: Sequence[int] = RETRY_SLEEPS, on: Sequence[type[Exception]] = RETRY_ON) -> None:
         self.sleeps = sleeps
         self.on = on
 
@@ -219,7 +220,7 @@ def get_rows(
     streaming: bool,
     rows_max_number: int,
     token: Union[bool, str, None] = False,
-    column_names: Optional[List[str]] = None,
+    column_names: Optional[list[str]] = None,
 ) -> RowsContent:
     download_config = DownloadConfig(delete_extracted=True)
     PIL.Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
@@ -257,7 +258,7 @@ def get_rows_or_raise(
     token: Union[bool, str, None],
     info: DatasetInfo,
     max_size_fallback: Optional[int] = None,
-    column_names: Optional[List[str]] = [],
+    column_names: Optional[list[str]] = [],
 ) -> RowsContent:
     try:
         return get_rows(
@@ -332,11 +333,29 @@ def create_branch(dataset: str, target_revision: str, hf_api: HfApi, committer_h
         raise DatasetNotFoundError("The dataset does not exist on the Hub (was deleted during job).") from err
 
 
+def check_config_exists(dataset: str, config: str) -> None:
+    """
+    Check if dataset has a provided config. Dataset's configs are taken from 'dataset-config-names' step's cache.
+    """
+    config_names_best_response = get_previous_step_or_raise(kinds=["dataset-config-names"], dataset=dataset)
+    try:
+        configs_content = config_names_best_response.response["content"]["config_names"]
+    except Exception as e:
+        raise PreviousStepFormatError(
+            "Previous steps 'dataset-config-names' did not return the expected content.",
+            e,
+        ) from e
+
+    if config not in [config_item["config"] for config_item in configs_content]:
+        raise ConfigNotFoundError(f"Config '{config}' does not exist for dataset '{dataset}'")
+
+
 def check_split_exists(dataset: str, config: str, split: str) -> None:
     """
     Check if dataset has a provided split in a provided config. Dataset's splits are taken from the best response
     of 'config-split-names-from-streaming' and 'config-split-names-from-info' steps' cache.
     """
+    check_config_exists(dataset, config)
     split_names_best_response = get_previous_step_or_raise(
         kinds=["config-split-names-from-streaming", "config-split-names-from-info"], dataset=dataset, config=config
     )
@@ -353,3 +372,43 @@ def check_split_exists(dataset: str, config: str, split: str) -> None:
 
     if split not in [split_item["split"] for split_item in splits_content]:
         raise SplitNotFoundError(f"Split '{split}' does not exist for the config '{config}' of the dataset.")
+
+
+def is_dataset_script_error() -> bool:
+    (t, v, tb) = sys.exc_info()
+    cause_traceback: list[str] = traceback.format_exception(t, v, tb)
+    return any(EXTERNAL_DATASET_SCRIPT_PATTERN in cause for cause in cause_traceback)
+
+
+def disable_dataset_scripts_support(allow_list: list[str]) -> AbstractContextManager[Any]:
+    original_init = HubDatasetModuleFactoryWithScript.__init__
+
+    def raise_unsupported_dataset_with_script_or_init(
+        self: HubDatasetModuleFactoryWithScript,
+        name: str,
+        revision: Optional[Union[str, datasets.Version]] = None,
+        download_config: Optional[DownloadConfig] = None,
+        download_mode: Optional[Union[datasets.DownloadMode, str]] = None,
+        dynamic_modules_path: Optional[str] = None,
+    ) -> None:
+        for allowed_pattern in allow_list:
+            if (allowed_pattern == "{{ALL_DATASETS_WITH_NO_NAMESPACE}}" and "/" not in name) or fnmatch(
+                name, allowed_pattern
+            ):
+                break
+        else:
+            raise DatasetWithScriptNotSupportedError(
+                "The dataset viewer doesn't support this dataset because it runs "
+                "arbitrary python code. Please open a discussion in the discussion tab "
+                "if you think this is an error and tag @lhoestq and @severo."
+            )
+        original_init(
+            self=self,
+            name=name,
+            revision=revision,
+            download_config=download_config,
+            download_mode=download_mode,
+            dynamic_modules_path=dynamic_modules_path,
+        )
+
+    return patch.object(HubDatasetModuleFactoryWithScript, "__init__", raise_unsupported_dataset_with_script_or_init)

@@ -1,19 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2022 The HuggingFace Authors.
 
+from collections.abc import Callable
 from http import HTTPStatus
-from typing import Any, Callable, List
+from typing import Any
 
 import pytest
+from libcommon.config import ProcessingGraphConfig
 from libcommon.processing_graph import ProcessingGraph
 from libcommon.resources import CacheMongoResource, QueueMongoResource
-from libcommon.simple_cache import CachedArtifactError, upsert_response
+from libcommon.simple_cache import CachedArtifactNotFoundError, upsert_response
 from libcommon.utils import Priority
 
 from worker.config import AppConfig
 from worker.job_runners.config.opt_in_out_urls_count import (
     ConfigOptInOutUrlsCountJobRunner,
 )
+
+from ..utils import REVISION_NAME
 
 
 @pytest.fixture(autouse=True)
@@ -37,21 +41,32 @@ def get_job_runner(
     ) -> ConfigOptInOutUrlsCountJobRunner:
         processing_step_name = ConfigOptInOutUrlsCountJobRunner.get_job_type()
         processing_graph = ProcessingGraph(
-            {
-                "dataset-level": {"input_type": "dataset"},
-                processing_step_name: {
-                    "input_type": "config",
-                    "job_runner_version": ConfigOptInOutUrlsCountJobRunner.get_job_runner_version(),
-                    "triggered_by": "dataset-level",
-                },
-            }
+            ProcessingGraphConfig(
+                {
+                    "dataset-level": {"input_type": "dataset"},
+                    processing_step_name: {
+                        "input_type": "config",
+                        "job_runner_version": ConfigOptInOutUrlsCountJobRunner.get_job_runner_version(),
+                        "triggered_by": "dataset-level",
+                    },
+                }
+            )
         )
+
+        upsert_response(
+            kind="dataset-config-names",
+            dataset=dataset,
+            dataset_git_revision=REVISION_NAME,
+            content={"config_names": [{"dataset": dataset, "config": config}]},
+            http_status=HTTPStatus.OK,
+        )
+
         return ConfigOptInOutUrlsCountJobRunner(
             job_info={
                 "type": ConfigOptInOutUrlsCountJobRunner.get_job_type(),
                 "params": {
                     "dataset": dataset,
-                    "revision": "revision",
+                    "revision": REVISION_NAME,
                     "config": config,
                     "split": None,
                 },
@@ -177,7 +192,7 @@ def get_job_runner(
             False,
         ),
         (
-            "previos_step_error",
+            "previous_step_error",
             "config",
             HTTPStatus.INTERNAL_SERVER_ERROR,
             {},
@@ -212,8 +227,8 @@ def test_compute(
     config: str,
     split_names_status: HTTPStatus,
     split_names_content: Any,
-    spawning_status: List[HTTPStatus],
-    spawning_content: List[Any],
+    spawning_status: list[HTTPStatus],
+    spawning_content: list[Any],
     expected_error_code: str,
     expected_content: Any,
     should_raise: bool,
@@ -221,6 +236,7 @@ def test_compute(
     upsert_response(
         kind="config-split-names-from-streaming",
         dataset=dataset,
+        dataset_git_revision=REVISION_NAME,
         config=config,
         content=split_names_content,
         http_status=split_names_status,
@@ -231,6 +247,7 @@ def test_compute(
             upsert_response(
                 kind="split-opt-in-out-urls-count",
                 dataset=dataset,
+                dataset_git_revision=REVISION_NAME,
                 config=split_item["config"],
                 split=split_item["split"],
                 content=content,
@@ -249,5 +266,5 @@ def test_compute(
 def test_doesnotexist(app_config: AppConfig, get_job_runner: GetJobRunner) -> None:
     dataset = config = "doesnotexist"
     job_runner = get_job_runner(dataset, config, app_config)
-    with pytest.raises(CachedArtifactError):
+    with pytest.raises(CachedArtifactNotFoundError):
         job_runner.compute()

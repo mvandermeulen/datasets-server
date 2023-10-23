@@ -4,16 +4,17 @@ import asyncio
 import logging
 import os
 import sys
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from random import random
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
 import orjson
 from filelock import FileLock
 from libcommon.processing_graph import ProcessingGraph
 from libcommon.queue import Queue
 from libcommon.utils import get_datetime
-from mirakuru import OutputExecutor
+from mirakuru import OutputExecutor, ProcessExitedWithError
 
 from worker import start_worker_loop
 from worker.config import AppConfig
@@ -27,7 +28,7 @@ START_WORKER_LOOP_PATH = start_worker_loop.__file__
 async def every(
     func: Callable[..., Optional[Any]],
     *args: Any,
-    seconds: Union[float, Tuple[float, float]],
+    seconds: Union[float, tuple[float, float]],
     stop_on: Optional[Any] = None,
     **kwargs: Any,
 ) -> None:
@@ -52,7 +53,7 @@ class WorkerExecutor:
         self.app_config = app_config
         self.job_runner_factory = job_runner_factory
         self.state_file_path = state_file_path
-        self.processing_graph = ProcessingGraph(self.app_config.processing_graph.specification)
+        self.processing_graph = ProcessingGraph(self.app_config.processing_graph)
 
         max_missing_heartbeats = self.app_config.worker.max_missing_heartbeats
         heartbeat_interval_seconds = self.app_config.worker.heartbeat_interval_seconds
@@ -180,5 +181,16 @@ class WorkerExecutor:
     def is_worker_alive(self, worker_loop_executor: OutputExecutor) -> bool:
         if worker_loop_executor.running():
             return True
-        worker_loop_executor.stop()  # raises an error if the worker returned exit code 1
+        try:
+            worker_loop_executor.stop()  # raises an error if the worker returned unexpected exit code
+        except ProcessExitedWithError as err:
+            explanation = f"exit code f{err.exit_code}"
+            if err.exit_code == -9:
+                explanation += " SIGKILL - surely an OOM"
+            error_msg = f"Worker crashed ({explanation})"
+            state = self.get_state()
+            if state and state["current_job_info"]:
+                error_msg += f"when running job_id={state['current_job_info']['job_id']}"
+            logging.error(error_msg)
+            raise
         return False

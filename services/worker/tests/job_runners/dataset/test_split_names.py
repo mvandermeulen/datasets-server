@@ -1,18 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2022 The HuggingFace Authors.
 
+from collections.abc import Callable
 from http import HTTPStatus
-from typing import Any, Callable
+from typing import Any
 
 import pytest
+from libcommon.config import ProcessingGraphConfig
 from libcommon.exceptions import PreviousStepFormatError
 from libcommon.processing_graph import ProcessingGraph
 from libcommon.resources import CacheMongoResource, QueueMongoResource
-from libcommon.simple_cache import CachedArtifactError, upsert_response
+from libcommon.simple_cache import CachedArtifactNotFoundError, upsert_response
 from libcommon.utils import Priority
 
 from worker.config import AppConfig
 from worker.job_runners.dataset.split_names import DatasetSplitNamesJobRunner
+
+from ..utils import REVISION_NAME
 
 GetJobRunner = Callable[[str, AppConfig], DatasetSplitNamesJobRunner]
 
@@ -28,19 +32,21 @@ def get_job_runner(
     ) -> DatasetSplitNamesJobRunner:
         processing_step_name = DatasetSplitNamesJobRunner.get_job_type()
         processing_graph = ProcessingGraph(
-            {
-                processing_step_name: {
-                    "input_type": "dataset",
-                    "job_runner_version": DatasetSplitNamesJobRunner.get_job_runner_version(),
+            ProcessingGraphConfig(
+                {
+                    processing_step_name: {
+                        "input_type": "dataset",
+                        "job_runner_version": DatasetSplitNamesJobRunner.get_job_runner_version(),
+                    }
                 }
-            }
+            )
         )
         return DatasetSplitNamesJobRunner(
             job_info={
                 "type": DatasetSplitNamesJobRunner.get_job_type(),
                 "params": {
                     "dataset": dataset,
-                    "revision": "revision",
+                    "revision": REVISION_NAME,
                     "config": None,
                     "split": None,
                 },
@@ -148,6 +154,7 @@ def test_compute_progress(
     upsert_response(
         kind="dataset-config-names",
         dataset=dataset,
+        dataset_git_revision=REVISION_NAME,
         content={
             "config_names": [
                 {
@@ -165,6 +172,7 @@ def test_compute_progress(
         upsert_response(
             kind="config-split-names-from-info",
             dataset=dataset,
+            dataset_git_revision=REVISION_NAME,
             config=config["config"],
             content=config["response"],
             http_status=HTTPStatus.OK,
@@ -172,6 +180,7 @@ def test_compute_progress(
         upsert_response(
             kind="config-split-names-from-streaming",
             dataset=dataset,
+            dataset_git_revision=REVISION_NAME,
             config=config["config"],
             content=config["response"],
             http_status=HTTPStatus.OK,
@@ -190,6 +199,7 @@ def test_compute_error(app_config: AppConfig, get_job_runner: GetJobRunner) -> N
     upsert_response(
         kind="dataset-config-names",
         dataset=dataset,
+        dataset_git_revision=REVISION_NAME,
         content={
             "config_names": [
                 {
@@ -205,6 +215,7 @@ def test_compute_error(app_config: AppConfig, get_job_runner: GetJobRunner) -> N
     upsert_response(
         kind="config-split-names-from-info",
         dataset=dataset,
+        dataset_git_revision=REVISION_NAME,
         config=config,
         content={},
         http_status=HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -212,6 +223,7 @@ def test_compute_error(app_config: AppConfig, get_job_runner: GetJobRunner) -> N
     upsert_response(
         kind="config-split-names-from-streaming",
         dataset=dataset,
+        dataset_git_revision=REVISION_NAME,
         config=config,
         content={},
         http_status=HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -232,6 +244,7 @@ def test_compute_format_error(app_config: AppConfig, get_job_runner: GetJobRunne
     upsert_response(
         kind="dataset-config-names",
         dataset=dataset,
+        dataset_git_revision=REVISION_NAME,
         content={
             "config_names": [
                 {
@@ -248,6 +261,7 @@ def test_compute_format_error(app_config: AppConfig, get_job_runner: GetJobRunne
     upsert_response(
         kind="config-split-names-from-info",
         dataset=dataset,
+        dataset_git_revision=REVISION_NAME,
         config=config,
         content={"wrong_format": []},
         http_status=HTTPStatus.OK,
@@ -255,6 +269,7 @@ def test_compute_format_error(app_config: AppConfig, get_job_runner: GetJobRunne
     upsert_response(
         kind="config-split-names-from-streaming",
         dataset=dataset,
+        dataset_git_revision=REVISION_NAME,
         config=config,
         content={"splits": [{"dataset": "dataset", "config": "config", "split": "split"}]},
         http_status=HTTPStatus.OK,
@@ -267,5 +282,5 @@ def test_compute_format_error(app_config: AppConfig, get_job_runner: GetJobRunne
 def test_doesnotexist(app_config: AppConfig, get_job_runner: GetJobRunner) -> None:
     dataset = "doesnotexist"
     job_runner = get_job_runner(dataset, app_config)
-    with pytest.raises(CachedArtifactError):
+    with pytest.raises(CachedArtifactNotFoundError):
         job_runner.compute()

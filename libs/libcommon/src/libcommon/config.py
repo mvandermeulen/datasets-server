@@ -4,11 +4,12 @@
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from environs import Env
 
 from libcommon.constants import (
+    MIN_BYTES_FOR_BONUS_DIFFICULTY,
     PROCESSING_STEP_CONFIG_INFO_VERSION,
     PROCESSING_STEP_CONFIG_IS_VALID_VERSION,
     PROCESSING_STEP_CONFIG_OPT_IN_OUT_URLS_COUNT_VERSION,
@@ -19,6 +20,7 @@ from libcommon.constants import (
     PROCESSING_STEP_CONFIG_SPLIT_NAMES_FROM_INFO_VERSION,
     PROCESSING_STEP_CONFIG_SPLIT_NAMES_FROM_STREAMING_VERSION,
     PROCESSING_STEP_DATASET_CONFIG_NAMES_VERSION,
+    PROCESSING_STEP_DATASET_HUB_CACHE_VERSION,
     PROCESSING_STEP_DATASET_INFO_VERSION,
     PROCESSING_STEP_DATASET_IS_VALID_VERSION,
     PROCESSING_STEP_DATASET_OPT_IN_OUT_URLS_COUNT_VERSION,
@@ -34,16 +36,20 @@ from libcommon.constants import (
     PROCESSING_STEP_SPLIT_OPT_IN_OUT_URLS_COUNT_VERSION,
     PROCESSING_STEP_SPLIT_OPT_IN_OUT_URLS_SCAN_VERSION,
 )
-from libcommon.processing_graph import ProcessingGraphSpecification
+
+if TYPE_CHECKING:
+    from libcommon.processing_graph import ProcessingGraphSpecification
 
 ASSETS_BASE_URL = "assets"
 ASSETS_STORAGE_DIRECTORY = None
+ASSETS_S3_FOLDER_NAME = "assets"
 
 
 @dataclass(frozen=True)
 class AssetsConfig:
     base_url: str = ASSETS_BASE_URL
     storage_directory: Optional[str] = ASSETS_STORAGE_DIRECTORY
+    s3_folder_name: str = ASSETS_S3_FOLDER_NAME
 
     @classmethod
     def from_env(cls) -> "AssetsConfig":
@@ -52,25 +58,45 @@ class AssetsConfig:
             return cls(
                 base_url=env.str(name="BASE_URL", default=ASSETS_BASE_URL),
                 storage_directory=env.str(name="STORAGE_DIRECTORY", default=ASSETS_STORAGE_DIRECTORY),
+                s3_folder_name=env.str(name="S3_FOLDER_NAME", default=ASSETS_S3_FOLDER_NAME),
+            )
+
+
+S3_BUCKET = "hf-datasets-server-statics"
+S3_ACCESS_KEY_ID = None
+S3_SECRET_ACCESS_KEY = None
+S3_REGION = "us-east-1"
+
+
+@dataclass(frozen=True)
+class S3Config:
+    bucket: str = S3_BUCKET
+    access_key_id: Optional[str] = S3_ACCESS_KEY_ID
+    secret_access_key: Optional[str] = S3_SECRET_ACCESS_KEY
+    region: str = S3_REGION
+
+    @classmethod
+    def from_env(cls) -> "S3Config":
+        env = Env(expand_vars=True)
+        with env.prefixed("S3_"):
+            return cls(
+                bucket=env.str(name="BUCKET", default=S3_BUCKET),
+                access_key_id=env.str(name="ACCESS_KEY_ID", default=S3_ACCESS_KEY_ID),
+                secret_access_key=env.str(name="SECRET_ACCESS_KEY", default=S3_SECRET_ACCESS_KEY),
+                region=env.str(name="REGION", default=S3_REGION),
             )
 
 
 CACHED_ASSETS_BASE_URL = "cached-assets"
 CACHED_ASSETS_STORAGE_DIRECTORY = None
-CACHED_ASSETS_CLEAN_CACHE_PROBA = 0.05
-CACHED_ASSETS_KEEP_FIRST_ROWS_NUMBER = 100
-CACHED_ASSETS_KEEP_MOST_RECENT_ROWS_NUMBER = 200
-CACHED_ASSETS_MAX_CLEANED_ROWS_NUMBER = 10_000
+CACHED_ASSETS_S3_FOLDER_NAME = "cached-assets"
 
 
 @dataclass(frozen=True)
 class CachedAssetsConfig:
     base_url: str = ASSETS_BASE_URL
     storage_directory: Optional[str] = CACHED_ASSETS_STORAGE_DIRECTORY
-    clean_cache_proba: float = CACHED_ASSETS_CLEAN_CACHE_PROBA
-    keep_first_rows_number: int = CACHED_ASSETS_KEEP_FIRST_ROWS_NUMBER
-    keep_most_recent_rows_number: int = CACHED_ASSETS_KEEP_MOST_RECENT_ROWS_NUMBER
-    max_cleaned_rows_number: int = CACHED_ASSETS_MAX_CLEANED_ROWS_NUMBER
+    s3_folder_name: str = CACHED_ASSETS_S3_FOLDER_NAME
 
     @classmethod
     def from_env(cls) -> "CachedAssetsConfig":
@@ -79,16 +105,7 @@ class CachedAssetsConfig:
             return cls(
                 base_url=env.str(name="BASE_URL", default=CACHED_ASSETS_BASE_URL),
                 storage_directory=env.str(name="STORAGE_DIRECTORY", default=CACHED_ASSETS_STORAGE_DIRECTORY),
-                clean_cache_proba=env.float(name="CLEAN_CACHE_PROBA", default=CACHED_ASSETS_CLEAN_CACHE_PROBA),
-                keep_first_rows_number=env.float(
-                    name="KEEP_FIRST_ROWS_NUMBER", default=CACHED_ASSETS_KEEP_FIRST_ROWS_NUMBER
-                ),
-                keep_most_recent_rows_number=env.float(
-                    name="KEEP_MOST_RECENT_ROWS_NUMBER", default=CACHED_ASSETS_KEEP_MOST_RECENT_ROWS_NUMBER
-                ),
-                max_cleaned_rows_number=env.float(
-                    name="MAX_CLEAN_SAMPLE_SIZE", default=CACHED_ASSETS_MAX_CLEANED_ROWS_NUMBER
-                ),
+                s3_folder_name=env.str(name="S3_FOLDER_NAME", default=CACHED_ASSETS_S3_FOLDER_NAME),
             )
 
 
@@ -108,12 +125,34 @@ class ParquetMetadataConfig:
             )
 
 
+ROWS_INDEX_MAX_ARROW_DATA_IN_MEMORY = 300_000_000
+
+
+@dataclass(frozen=True)
+class RowsIndexConfig:
+    max_arrow_data_in_memory: int = ROWS_INDEX_MAX_ARROW_DATA_IN_MEMORY
+
+    @classmethod
+    def from_env(cls) -> "RowsIndexConfig":
+        env = Env(expand_vars=True)
+        with env.prefixed("ROWS_INDEX_"):
+            return cls(
+                max_arrow_data_in_memory=env.int(
+                    name="MAX_ARROW_DATA_IN_MEMORY", default=ROWS_INDEX_MAX_ARROW_DATA_IN_MEMORY
+                ),
+            )
+
+
+COMMON_BLOCKED_DATASETS: list[str] = []
+COMMON_DATASET_SCRIPTS_ALLOW_LIST: list[str] = []
 COMMON_HF_ENDPOINT = "https://huggingface.co"
 COMMON_HF_TOKEN = None
 
 
 @dataclass(frozen=True)
 class CommonConfig:
+    blocked_datasets: list[str] = field(default_factory=COMMON_BLOCKED_DATASETS.copy)
+    dataset_scripts_allow_list: list[str] = field(default_factory=COMMON_DATASET_SCRIPTS_ALLOW_LIST.copy)
     hf_endpoint: str = COMMON_HF_ENDPOINT
     hf_token: Optional[str] = COMMON_HF_TOKEN
 
@@ -122,6 +161,10 @@ class CommonConfig:
         env = Env(expand_vars=True)
         with env.prefixed("COMMON_"):
             return cls(
+                blocked_datasets=env.list(name="BLOCKED_DATASETS", default=COMMON_BLOCKED_DATASETS.copy()),
+                dataset_scripts_allow_list=env.list(
+                    name="DATASET_SCRIPTS_ALLOW_LIST", default=COMMON_DATASET_SCRIPTS_ALLOW_LIST.copy()
+                ),
                 hf_endpoint=env.str(name="HF_ENDPOINT", default=COMMON_HF_ENDPOINT),
                 hf_token=env.str(name="HF_TOKEN", default=COMMON_HF_TOKEN),  # nosec
             )
@@ -186,7 +229,7 @@ class QueueConfig:
 
 @dataclass(frozen=True)
 class ProcessingGraphConfig:
-    specification: ProcessingGraphSpecification = field(
+    specification: "ProcessingGraphSpecification" = field(
         default_factory=lambda: {
             "dataset-config-names": {
                 "input_type": "dataset",
@@ -246,6 +289,7 @@ class ProcessingGraphConfig:
                 "triggered_by": "config-parquet-and-info",
                 "job_runner_version": PROCESSING_STEP_CONFIG_INFO_VERSION,
                 "difficulty": 20,
+                "provides_config_info": True,
             },
             "dataset-info": {
                 "input_type": "dataset",
@@ -291,6 +335,7 @@ class ProcessingGraphConfig:
                 ],
                 "job_runner_version": PROCESSING_STEP_SPLIT_DESCRIPTIVE_STATISTICS_VERSION,
                 "difficulty": 70,
+                "bonus_difficulty_if_dataset_is_big": 20,
             },
             "split-is-valid": {
                 "input_type": "split",
@@ -367,9 +412,17 @@ class ProcessingGraphConfig:
                 "enables_search": True,
                 "job_runner_version": PROCESSING_STEP_SPLIT_DUCKDB_INDEX_VERSION,
                 "difficulty": 70,
+                "bonus_difficulty_if_dataset_is_big": 20,
+            },
+            "dataset-hub-cache": {
+                "input_type": "dataset",
+                "triggered_by": ["dataset-is-valid", "dataset-size"],
+                "job_runner_version": PROCESSING_STEP_DATASET_HUB_CACHE_VERSION,
+                "difficulty": 20,
             },
         }
     )
+    min_bytes_for_bonus_difficulty: int = MIN_BYTES_FOR_BONUS_DIFFICULTY
 
     @classmethod
     def from_env(cls) -> "ProcessingGraphConfig":

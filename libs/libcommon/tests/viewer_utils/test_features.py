@@ -2,7 +2,9 @@
 # Copyright 2022 The HuggingFace Authors.
 
 import datetime
-from typing import Any, Mapping
+import os
+from collections.abc import Mapping
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -10,10 +12,19 @@ import pytest
 from datasets import Audio, Dataset, Features, Image, Value
 
 from libcommon.storage import StrPath
+from libcommon.storage_options import DirectoryStorageOptions
 from libcommon.viewer_utils.features import (
     get_cell_value,
     get_supported_unsupported_columns,
 )
+
+
+@pytest.fixture
+def storage_options(cached_assets_directory: StrPath) -> DirectoryStorageOptions:
+    return DirectoryStorageOptions(
+        assets_base_url="http://localhost/assets", assets_directory=cached_assets_directory, overwrite=True
+    )
+
 
 # we need to know the correspondence between the feature type and the cell value, in order to:
 # - document the API
@@ -55,11 +66,11 @@ from libcommon.viewer_utils.features import (
     ],
 )
 def test_value(
+    storage_options: DirectoryStorageOptions,
     dataset_type: str,
     output_value: Any,
     output_dtype: str,
     datasets: Mapping[str, Dataset],
-    cached_assets_directory: StrPath,
 ) -> None:
     dataset = datasets[dataset_type]
     feature = dataset.features["col"]
@@ -67,16 +78,37 @@ def test_value(
     assert feature.dtype == output_dtype
     value = get_cell_value(
         dataset="dataset",
+        revision="revision",
         config="config",
         split="split",
         row_idx=7,
         cell=dataset[0]["col"],
         featureName="col",
         fieldType=feature,
-        assets_base_url="http://localhost/assets",
-        assets_directory=cached_assets_directory,
+        storage_options=storage_options,
     )
     assert value == output_value
+
+
+def assert_output_has_valid_files(value: Any, storage_options: DirectoryStorageOptions) -> None:
+    if isinstance(value, list):
+        for item in value:
+            assert_output_has_valid_files(item, storage_options=storage_options)
+    elif isinstance(value, dict):
+        if (
+            "src" in value
+            and isinstance(value["src"], str)
+            and value["src"].startswith(storage_options.assets_base_url)
+        ):
+            path = os.path.join(
+                storage_options.assets_directory,
+                value["src"][len(storage_options.assets_base_url) + 1 :],  # noqa: E203
+            )
+            assert os.path.exists(path)
+            assert os.path.getsize(path) > 0
+
+
+ASSETS_BASE_URL_SPLIT = "http://localhost/assets/dataset/--/revision/--/config/split"
 
 
 @pytest.mark.parametrize(
@@ -133,13 +165,19 @@ def test_value(
             "audio",
             [
                 {
-                    "src": "http://localhost/assets/dataset/--/config/split/7/col/audio.mp3",
-                    "type": "audio/mpeg",
-                },
-                {
-                    "src": "http://localhost/assets/dataset/--/config/split/7/col/audio.wav",
+                    "src": f"{ASSETS_BASE_URL_SPLIT}/7/col/audio.wav",
                     "type": "audio/wav",
-                },
+                }
+            ],
+            "Audio",
+        ),
+        (
+            "audio_ogg",
+            [
+                {
+                    "src": f"{ASSETS_BASE_URL_SPLIT}/7/col/audio.wav",
+                    "type": "audio/wav",
+                }
             ],
             "Audio",
         ),
@@ -149,7 +187,7 @@ def test_value(
         (
             "image",
             {
-                "src": "http://localhost/assets/dataset/--/config/split/7/col/image.jpg",
+                "src": f"{ASSETS_BASE_URL_SPLIT}/7/col/image.jpg",
                 "height": 480,
                 "width": 640,
             },
@@ -168,12 +206,12 @@ def test_value(
             "images_list",
             [
                 {
-                    "src": "http://localhost/assets/dataset/--/config/split/7/col/image-1d100e9.jpg",
+                    "src": f"{ASSETS_BASE_URL_SPLIT}/7/col/image-1d100e9.jpg",
                     "height": 480,
                     "width": 640,
                 },
                 {
-                    "src": "http://localhost/assets/dataset/--/config/split/7/col/image-1d300ea.jpg",
+                    "src": f"{ASSETS_BASE_URL_SPLIT}/7/col/image-1d300ea.jpg",
                     "height": 480,
                     "width": 640,
                 },
@@ -185,21 +223,13 @@ def test_value(
             [
                 [
                     {
-                        "src": "http://localhost/assets/dataset/--/config/split/7/col/audio-1d100e9.mp3",
-                        "type": "audio/mpeg",
-                    },
-                    {
-                        "src": "http://localhost/assets/dataset/--/config/split/7/col/audio-1d100e9.wav",
+                        "src": f"{ASSETS_BASE_URL_SPLIT}/7/col/audio-1d100e9.wav",
                         "type": "audio/wav",
                     },
                 ],
                 [
                     {
-                        "src": "http://localhost/assets/dataset/--/config/split/7/col/audio-1d300ea.mp3",
-                        "type": "audio/mpeg",
-                    },
-                    {
-                        "src": "http://localhost/assets/dataset/--/config/split/7/col/audio-1d300ea.wav",
+                        "src": f"{ASSETS_BASE_URL_SPLIT}/7/col/audio-1d300ea.wav",
                         "type": "audio/wav",
                     },
                 ],
@@ -210,12 +240,12 @@ def test_value(
             "images_sequence",
             [
                 {
-                    "src": "http://localhost/assets/dataset/--/config/split/7/col/image-1d100e9.jpg",
+                    "src": f"{ASSETS_BASE_URL_SPLIT}/7/col/image-1d100e9.jpg",
                     "height": 480,
                     "width": 640,
                 },
                 {
-                    "src": "http://localhost/assets/dataset/--/config/split/7/col/image-1d300ea.jpg",
+                    "src": f"{ASSETS_BASE_URL_SPLIT}/7/col/image-1d300ea.jpg",
                     "height": 480,
                     "width": 640,
                 },
@@ -227,21 +257,13 @@ def test_value(
             [
                 [
                     {
-                        "src": "http://localhost/assets/dataset/--/config/split/7/col/audio-1d100e9.mp3",
-                        "type": "audio/mpeg",
-                    },
-                    {
-                        "src": "http://localhost/assets/dataset/--/config/split/7/col/audio-1d100e9.wav",
+                        "src": f"{ASSETS_BASE_URL_SPLIT}/7/col/audio-1d100e9.wav",
                         "type": "audio/wav",
                     },
                 ],
                 [
                     {
-                        "src": "http://localhost/assets/dataset/--/config/split/7/col/audio-1d300ea.mp3",
-                        "type": "audio/mpeg",
-                    },
-                    {
-                        "src": "http://localhost/assets/dataset/--/config/split/7/col/audio-1d300ea.wav",
+                        "src": f"{ASSETS_BASE_URL_SPLIT}/7/col/audio-1d300ea.wav",
                         "type": "audio/wav",
                     },
                 ],
@@ -254,12 +276,12 @@ def test_value(
                 "a": 0,
                 "b": [
                     {
-                        "src": "http://localhost/assets/dataset/--/config/split/7/col/image-89101db.jpg",
+                        "src": f"{ASSETS_BASE_URL_SPLIT}/7/col/image-89101db.jpg",
                         "height": 480,
                         "width": 640,
                     },
                     {
-                        "src": "http://localhost/assets/dataset/--/config/split/7/col/image-89301dc.jpg",
+                        "src": f"{ASSETS_BASE_URL_SPLIT}/7/col/image-89301dc.jpg",
                         "height": 480,
                         "width": 640,
                     },
@@ -268,21 +290,13 @@ def test_value(
                     "ca": [
                         [
                             {
-                                "src": "http://localhost/assets/dataset/--/config/split/7/col/audio-18360330.mp3",
-                                "type": "audio/mpeg",
-                            },
-                            {
-                                "src": "http://localhost/assets/dataset/--/config/split/7/col/audio-18360330.wav",
+                                "src": f"{ASSETS_BASE_URL_SPLIT}/7/col/audio-18360330.wav",
                                 "type": "audio/wav",
                             },
                         ],
                         [
                             {
-                                "src": "http://localhost/assets/dataset/--/config/split/7/col/audio-18380331.mp3",
-                                "type": "audio/mpeg",
-                            },
-                            {
-                                "src": "http://localhost/assets/dataset/--/config/split/7/col/audio-18380331.wav",
+                                "src": f"{ASSETS_BASE_URL_SPLIT}/7/col/audio-18380331.wav",
                                 "type": "audio/wav",
                             },
                         ],
@@ -300,7 +314,7 @@ def test_others(
     output_value: Any,
     output_type: Any,
     datasets: Mapping[str, Dataset],
-    cached_assets_directory: StrPath,
+    storage_options: DirectoryStorageOptions,
 ) -> None:
     dataset = datasets[dataset_type]
     feature = dataset.features["col"]
@@ -308,18 +322,34 @@ def test_others(
         assert feature == output_type
     else:
         assert feature._type == output_type
+    # decoded
     value = get_cell_value(
         dataset="dataset",
+        revision="revision",
         config="config",
         split="split",
         row_idx=7,
         cell=dataset[0]["col"],
         featureName="col",
         fieldType=feature,
-        assets_base_url="http://localhost/assets",
-        assets_directory=cached_assets_directory,
+        storage_options=storage_options,
     )
     assert value == output_value
+    assert_output_has_valid_files(output_value, storage_options=storage_options)
+    # encoded
+    value = get_cell_value(
+        dataset="dataset",
+        revision="revision",
+        config="config",
+        split="split",
+        row_idx=7,
+        cell=dataset.with_format("arrow")[0].to_pydict()["col"][0],
+        featureName="col",
+        fieldType=feature,
+        storage_options=storage_options,
+    )
+    assert value == output_value
+    assert_output_has_valid_files(output_value, storage_options=storage_options)
 
 
 def test_get_supported_unsupported_columns() -> None:

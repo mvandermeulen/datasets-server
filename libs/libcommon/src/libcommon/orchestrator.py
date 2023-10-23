@@ -4,11 +4,12 @@
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Union
+from typing import Optional, Union
 
 import pandas as pd
 
 from libcommon.constants import ERROR_CODES_TO_RETRY
+from libcommon.exceptions import DatasetInBlockListError
 from libcommon.processing_graph import (
     ProcessingGraph,
     ProcessingStep,
@@ -17,28 +18,30 @@ from libcommon.processing_graph import (
 from libcommon.prometheus import StepProfiler
 from libcommon.queue import Queue
 from libcommon.simple_cache import (
+    delete_dataset_responses,
     fetch_names,
+    get_best_response,
     get_cache_entries_df,
     has_some_cache,
     upsert_response_params,
 )
 from libcommon.state import ArtifactState, DatasetState, FirstStepsDatasetState
-from libcommon.utils import JobInfo, JobResult, Priority
+from libcommon.utils import JobInfo, JobResult, Priority, raise_if_blocked
 
 # TODO: clean dangling cache entries
 
 
 @dataclass
 class CacheStatus:
-    cache_has_different_git_revision: Dict[str, ArtifactState] = field(default_factory=dict)
-    cache_is_old: Dict[str, ArtifactState] = field(default_factory=dict)
-    cache_is_outdated_by_parent: Dict[str, ArtifactState] = field(default_factory=dict)
-    cache_is_empty: Dict[str, ArtifactState] = field(default_factory=dict)
-    cache_is_error_to_retry: Dict[str, ArtifactState] = field(default_factory=dict)
-    cache_is_job_runner_obsolete: Dict[str, ArtifactState] = field(default_factory=dict)
-    up_to_date: Dict[str, ArtifactState] = field(default_factory=dict)
+    cache_has_different_git_revision: dict[str, ArtifactState] = field(default_factory=dict)
+    cache_is_old: dict[str, ArtifactState] = field(default_factory=dict)
+    cache_is_outdated_by_parent: dict[str, ArtifactState] = field(default_factory=dict)
+    cache_is_empty: dict[str, ArtifactState] = field(default_factory=dict)
+    cache_is_error_to_retry: dict[str, ArtifactState] = field(default_factory=dict)
+    cache_is_job_runner_obsolete: dict[str, ArtifactState] = field(default_factory=dict)
+    up_to_date: dict[str, ArtifactState] = field(default_factory=dict)
 
-    def as_response(self) -> Dict[str, List[str]]:
+    def as_response(self) -> dict[str, list[str]]:
         return {
             "cache_has_different_git_revision": sorted(self.cache_has_different_git_revision.keys()),
             "cache_is_old": sorted(self.cache_is_old.keys()),
@@ -52,9 +55,9 @@ class CacheStatus:
 
 @dataclass
 class QueueStatus:
-    in_process: Set[str] = field(default_factory=set)
+    in_process: set[str] = field(default_factory=set)
 
-    def as_response(self) -> Dict[str, List[str]]:
+    def as_response(self) -> dict[str, list[str]]:
         return {"in_process": sorted(self.in_process)}
 
 
@@ -70,7 +73,7 @@ class Task(ABC):
 
 @dataclass
 class CreateJobsTask(Task):
-    job_infos: List[JobInfo] = field(default_factory=list)
+    job_infos: list[JobInfo] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # for debug and testing
@@ -116,12 +119,48 @@ class DeleteJobsTask(Task):
                 )
 
 
-SupportedTask = Union[CreateJobsTask, DeleteJobsTask]
+@dataclass
+class DeleteDatasetJobsTask(Task):
+    dataset: str
+
+    def __post_init__(self) -> None:
+        # for debug and testing
+        self.id = f"DeleteDatasetJobs,{len(self.dataset)}"
+        self.long_id = self.id
+
+    def run(self) -> None:
+        with StepProfiler(
+            method="DeleteDatasetJobsTask.run",
+            step="all",
+            context=f"dataset={self.dataset}",
+        ):
+            Queue().cancel_dataset_jobs(dataset=self.dataset)
+
+
+@dataclass
+class DeleteDatasetCacheEntriesTask(Task):
+    dataset: str
+
+    def __post_init__(self) -> None:
+        # for debug and testing
+        self.id = f"DeleteDatasetCacheEntries,{len(self.dataset)}"
+        self.long_id = self.id
+
+    def run(self) -> None:
+        with StepProfiler(
+            method="DeleteDatasetCacheEntriesTask.run",
+            step="all",
+            context=f"dataset={self.dataset}",
+        ):
+            delete_dataset_responses(dataset=self.dataset)
+
+
+SupportedTask = Union[CreateJobsTask, DeleteJobsTask, DeleteDatasetJobsTask, DeleteDatasetCacheEntriesTask]
 
 
 @dataclass
 class Plan:
-    tasks: List[SupportedTask] = field(init=False)
+    tasks: list[SupportedTask] = field(init=False)
 
     def __post_init__(self) -> None:
         self.tasks = []
@@ -140,8 +179,29 @@ class Plan:
             task.run()
         return len(self.tasks)
 
-    def as_response(self) -> List[str]:
+    def as_response(self) -> list[str]:
         return sorted(task.id for task in self.tasks)
+
+
+def get_num_bytes_from_config_infos(
+    processing_graph: ProcessingGraph, dataset: str, config: str, split: Optional[str] = None
+) -> Optional[int]:
+    kinds = [processing_step.cache_kind for processing_step in processing_graph.get_config_info_processing_steps()]
+    resp = get_best_response(kinds=kinds, dataset=dataset, config=config).response
+    if "dataset_info" in resp["content"] and isinstance(resp["content"]["dataset_info"], dict):
+        dataset_info = resp["content"]["dataset_info"]
+        if split is None:
+            num_bytes = dataset_info.get("dataset_size")
+            if isinstance(num_bytes, int):
+                return num_bytes
+        elif "splits" in dataset_info and isinstance(dataset_info["splits"], dict):
+            split_infos = dataset_info["splits"]
+            if split in split_infos and isinstance(split_infos[split], dict):
+                split_info = split_infos[split]
+                num_bytes = split_info.get("num_bytes")
+                if isinstance(num_bytes, int):
+                    return num_bytes
+    return None
 
 
 @dataclass
@@ -182,6 +242,14 @@ class AfterJobPlan(Plan):
             # no next processing step, nothing to do
             return
 
+        # get the dataset infos to estimate difficulty
+        if config is not None:
+            self.num_bytes = get_num_bytes_from_config_infos(
+                processing_graph=self.processing_graph, dataset=self.dataset, config=config, split=split
+            )
+        else:
+            self.num_bytes = None
+
         # get the list of pending jobs for the children
         # note that it can contain a lot of unrelated jobs, we will clean after
         self.pending_jobs_df = Queue().get_pending_jobs_df(
@@ -189,9 +257,9 @@ class AfterJobPlan(Plan):
             job_types=[next_processing_step.job_type for next_processing_step in next_processing_steps],
         )
 
-        self.job_infos_to_create: List[JobInfo] = []
-        config_names: Optional[List[str]] = None
-        split_names: Optional[List[str]] = None
+        self.job_infos_to_create: list[JobInfo] = []
+        config_names: Optional[list[str]] = None
+        split_names: Optional[list[str]] = None
 
         # filter to only get the jobs that are not already in the queue
         for next_processing_step in next_processing_steps:
@@ -283,6 +351,9 @@ class AfterJobPlan(Plan):
             self.pending_jobs_df.drop(ok_jobs_mask.idxmax(), inplace=True)
         else:
             # no pending job for the current processing step
+            difficulty = next_processing_step.difficulty
+            if self.num_bytes is not None and self.num_bytes >= self.processing_graph.min_bytes_for_bonus_difficulty:
+                difficulty += next_processing_step.bonus_difficulty_if_dataset_is_big
             self.job_infos_to_create.append(
                 {
                     "job_id": "not used",  # TODO: remove this field
@@ -294,7 +365,7 @@ class AfterJobPlan(Plan):
                         "revision": self.revision,
                     },
                     "priority": self.priority,
-                    "difficulty": next_processing_step.difficulty,
+                    "difficulty": difficulty,
                 }
             )
 
@@ -320,7 +391,7 @@ class DatasetBackfillPlan(Plan):
     processing_graph: ProcessingGraph
     revision: str
     cache_max_days: int
-    error_codes_to_retry: Optional[List[str]] = None
+    error_codes_to_retry: Optional[list[str]] = None
     priority: Priority = Priority.LOW
     only_first_processing_steps: bool = False
 
@@ -412,7 +483,7 @@ class DatasetBackfillPlan(Plan):
 
     def _get_artifact_states_for_step(
         self, processing_step: ProcessingStep, config: Optional[str] = None, split: Optional[str] = None
-    ) -> List[ArtifactState]:
+    ) -> list[ArtifactState]:
         """Get the artifact states for a step.
 
         Args:
@@ -541,7 +612,7 @@ class DatasetBackfillPlan(Plan):
 
     def _create_plan(self) -> None:
         pending_jobs_to_delete_df = self.pending_jobs_df.copy()
-        job_infos_to_create: List[JobInfo] = []
+        job_infos_to_create: list[JobInfo] = []
         artifact_states = (
             list(self.cache_status.cache_is_empty.values())
             + list(self.cache_status.cache_is_error_to_retry.values())
@@ -578,12 +649,62 @@ class DatasetBackfillPlan(Plan):
 
 
 @dataclass
+class DatasetRemovalPlan(Plan):
+    """
+    Plan to remove a dataset.
+
+    The plan is composed of tasks to delete jobs and cache entries.
+
+    Args:
+        dataset: dataset name
+    """
+
+    dataset: str
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.add_task(DeleteDatasetJobsTask(dataset=self.dataset))
+        self.add_task(DeleteDatasetCacheEntriesTask(dataset=self.dataset))
+
+
+@dataclass
 class DatasetOrchestrator:
+    """
+    Orchestrator for a dataset.
+
+    Args:
+        dataset (str): The name of the dataset.
+        processing_graph (ProcessingGraph): The processing graph.
+        blocked_datasets (list[str]): The list of blocked datasets. Supports Unix shell-style wildcards in the dataset
+          name, e.g. "open-llm-leaderboard/*" to block all the datasets in the `open-llm-leaderboard` namespace. They
+          are not allowed in the namespace name.
+
+    Raises:
+        libcommon.exceptions.DatasetInBlockListError: If the dataset is in the block list. As a side-effect, the
+          dataset is deleted from the Datasets Server.
+    """
+
     dataset: str
     processing_graph: ProcessingGraph
+    blocked_datasets: list[str]
+
+    def _raise_and_remove_if_blocked(self) -> None:
+        try:
+            raise_if_blocked(dataset=self.dataset, blocked_datasets=self.blocked_datasets)
+        except DatasetInBlockListError:
+            logging.warning(f"The dataset {self.dataset} is in the block list, we delete it from the Datasets Server.")
+            self.remove_dataset()
+            raise
+
+    def remove_dataset(self) -> None:
+        """
+        Remove the dataset from the Datasets Server
+        """
+        plan = DatasetRemovalPlan(dataset=self.dataset)
+        plan.run()
 
     def set_revision(
-        self, revision: str, priority: Priority, error_codes_to_retry: List[str], cache_max_days: int
+        self, revision: str, priority: Priority, error_codes_to_retry: list[str], cache_max_days: int
     ) -> None:
         """
         Set the current revision of the dataset.
@@ -594,7 +715,7 @@ class DatasetOrchestrator:
         Args:
             revision (str): The new revision of the dataset.
             priority (Priority): The priority of the jobs to create.
-            error_codes_to_retry (List[str]): The error codes for which the jobs should be retried.
+            error_codes_to_retry (list[str]): The error codes for which the jobs should be retried.
             cache_max_days (int): The maximum number of days for which the cache is considered valid.
 
         Returns:
@@ -604,6 +725,7 @@ class DatasetOrchestrator:
             ValueError: If the first processing steps are not dataset steps, or if the processing graph has no first
               step.
         """
+        self._raise_and_remove_if_blocked()
         first_processing_steps = self.processing_graph.get_first_processing_steps()
         if len(first_processing_steps) < 1:
             raise ValueError("Processing graph has no first step")
@@ -652,6 +774,7 @@ class DatasetOrchestrator:
         Raises:
             ValueError: If the job is not found, or if the processing step is not found.
         """
+        self._raise_and_remove_if_blocked()
         # check if the job is still in started status
         job_info = job_result["job_info"]
         if not Queue().is_job_started(job_id=job_info["job_id"]):
@@ -699,7 +822,7 @@ class DatasetOrchestrator:
         """
         return has_some_cache(dataset=self.dataset)
 
-    def has_pending_ancestor_jobs(self, processing_step_names: List[str]) -> bool:
+    def has_pending_ancestor_jobs(self, processing_step_names: list[str]) -> bool:
         """
         Check if the processing steps, or one of their ancestors, have a pending job, ie. if artifacts could exist
           in the cache in the future. This method is used when a cache entry is missing in the API,
@@ -713,7 +836,7 @@ class DatasetOrchestrator:
             consider that the artifact could exist.
 
         Args:
-            processing_step_names (List[str]): The processing step names (artifacts) to check.
+            processing_step_names (list[str]): The processing step names (artifacts) to check.
 
         Returns:
             bool: True if any of the artifact could exist, False otherwise.
@@ -721,7 +844,7 @@ class DatasetOrchestrator:
         Raises:
             ValueError: If any of the processing step does not exist.
         """
-        job_types: Set[str] = set()
+        job_types: set[str] = set()
         for processing_step_name in processing_step_names:
             try:
                 processing_step = self.processing_graph.get_processing_step(processing_step_name)
@@ -737,7 +860,7 @@ class DatasetOrchestrator:
         return Queue().has_pending_jobs(dataset=self.dataset, job_types=list(job_types))
 
     def backfill(
-        self, revision: str, priority: Priority, cache_max_days: int, error_codes_to_retry: Optional[List[str]] = None
+        self, revision: str, priority: Priority, cache_max_days: int, error_codes_to_retry: Optional[list[str]] = None
     ) -> int:
         """
         Backfill the cache for a given revision.
@@ -746,7 +869,7 @@ class DatasetOrchestrator:
             revision (str): The revision.
             priority (Priority): The priority of the jobs.
             cache_max_days (int): The maximum number of days to keep the cache.
-            error_codes_to_retry (Optional[List[str]]): The error codes for which the jobs should be retried.
+            error_codes_to_retry (Optional[list[str]]): The error codes for which the jobs should be retried.
 
         Returns:
             int: The number of jobs created.
@@ -757,6 +880,12 @@ class DatasetOrchestrator:
             context=f"dataset={self.dataset}",
         ):
             logging.info(f"Analyzing {self.dataset}")
+            with StepProfiler(
+                method="DatasetOrchestrator.raise_and_remove_if_blocked",
+                step="plan",
+                context=f"dataset={self.dataset}",
+            ):
+                self._raise_and_remove_if_blocked()
             with StepProfiler(
                 method="DatasetOrchestrator.backfill",
                 step="plan",

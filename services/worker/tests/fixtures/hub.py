@@ -5,21 +5,10 @@
 
 import csv
 import time
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import suppress
 from pathlib import Path
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    Iterator,
-    List,
-    Literal,
-    Mapping,
-    Optional,
-    Tuple,
-    TypedDict,
-    Union,
-)
+from typing import Any, Literal, Optional, TypedDict, Union
 
 import pytest
 import requests
@@ -29,12 +18,13 @@ from huggingface_hub.hf_api import HfApi
 from huggingface_hub.utils._errors import hf_raise_for_status
 
 from ..constants import CI_HUB_ENDPOINT, CI_URL_TEMPLATE, CI_USER, CI_USER_TOKEN
+from ..job_runners.utils import REVISION_NAME
 
 DATASET = "dataset"
 hf_api = HfApi(endpoint=CI_HUB_ENDPOINT)
 
 
-def get_default_config_split() -> Tuple[str, str]:
+def get_default_config_split() -> tuple[str, str]:
     config = "default"
     split = "train"
     return config, split
@@ -94,7 +84,7 @@ def update_repo_settings(
 
     path = f"{path_prefix}{namespace}/{name}/settings"
 
-    json: Dict[str, Union[bool, str]] = {}
+    json: dict[str, Union[bool, str]] = {}
     if private is not None:
         json["private"] = private
     if gated is not None:
@@ -112,7 +102,7 @@ def update_repo_settings(
 def create_hub_dataset_repo(
     *,
     prefix: str,
-    file_paths: Optional[List[str]] = None,
+    file_paths: Optional[list[str]] = None,
     dataset: Optional[Dataset] = None,
     private: bool = False,
     gated: Optional[str] = None,
@@ -147,7 +137,7 @@ def delete_hub_dataset_repo(repo_id: str) -> None:
 
 @pytest.fixture
 def tmp_dataset_repo_factory() -> Iterator[Callable[[str], str]]:
-    repo_ids: List[str] = []
+    repo_ids: list[str] = []
 
     def _tmp_dataset_repo(repo_id: str) -> str:
         nonlocal repo_ids
@@ -313,6 +303,15 @@ def hub_public_descriptive_statistics(datasets: Mapping[str, Dataset]) -> Iterat
     delete_hub_dataset_repo(repo_id=repo_id)
 
 
+@pytest.fixture(scope="session")
+def hub_public_descriptive_statistics_string_text(datasets: Mapping[str, Dataset]) -> Iterator[str]:
+    repo_id = create_hub_dataset_repo(
+        prefix="descriptive_statistics_string_text", dataset=datasets["descriptive_statistics_string_text"]
+    )
+    yield repo_id
+    delete_hub_dataset_repo(repo_id=repo_id)
+
+
 class HubDatasetTest(TypedDict):
     name: str
     config_names_response: Any
@@ -349,7 +348,7 @@ def create_splits_response(dataset: str) -> Any:
     }
 
 
-def create_first_rows_response(dataset: str, cols: Mapping[str, Any], rows: List[Any]) -> Any:
+def create_first_rows_response(dataset: str, cols: Mapping[str, Any], rows: list[Any]) -> Any:
     config, split = get_default_config_split()
     return {
         "dataset": dataset,
@@ -371,6 +370,7 @@ def create_first_rows_response(dataset: str, cols: Mapping[str, Any], rows: List
             }
             for row_idx, row in enumerate(rows)
         ],
+        "truncated": False,
     }
 
 
@@ -564,11 +564,7 @@ def get_AUDIO_rows(dataset: str) -> Any:
         {
             "col": [
                 {
-                    "src": f"http://localhost/assets/{dataset}/--/{config}/{split}/0/col/audio.mp3",
-                    "type": "audio/mpeg",
-                },
-                {
-                    "src": f"http://localhost/assets/{dataset}/--/{config}/{split}/0/col/audio.wav",
+                    "src": f"http://localhost/assets/{dataset}/--/{REVISION_NAME}/--/{config}/{split}/0/col/audio.wav",
                     "type": "audio/wav",
                 },
             ]
@@ -586,7 +582,7 @@ def get_IMAGE_rows(dataset: str) -> Any:
     return [
         {
             "col": {
-                "src": f"http://localhost/assets/{dataset}/--/{config}/{split}/0/col/image.jpg",
+                "src": f"http://localhost/assets/{dataset}/--/{REVISION_NAME}/--/{config}/{split}/0/col/image.jpg",
                 "height": 480,
                 "width": 640,
             },
@@ -598,6 +594,8 @@ IMAGES_LIST_cols = {
     "col": [{"_type": "Image"}],
 }
 
+ASSETS_BASE_URL = "http://localhost/assets"
+
 
 def get_IMAGES_LIST_rows(dataset: str) -> Any:
     config, split = get_default_config_split()
@@ -605,12 +603,16 @@ def get_IMAGES_LIST_rows(dataset: str) -> Any:
         {
             "col": [
                 {
-                    "src": f"http://localhost/assets/{dataset}/--/{config}/{split}/0/col/image-1d100e9.jpg",
+                    "src": (
+                        f"{ASSETS_BASE_URL}/{dataset}/--/{REVISION_NAME}/--/{config}/{split}/0/col/image-1d100e9.jpg"
+                    ),
                     "height": 480,
                     "width": 640,
                 },
                 {
-                    "src": f"http://localhost/assets/{dataset}/--/{config}/{split}/0/col/image-1d300ea.jpg",
+                    "src": (
+                        f"{ASSETS_BASE_URL}/{dataset}/--/{REVISION_NAME}/--/{config}/{split}/0/col/image-1d300ea.jpg"
+                    ),
                     "height": 480,
                     "width": 640,
                 },
@@ -862,6 +864,19 @@ def hub_responses_duckdb_index(hub_public_duckdb_index: str) -> HubDatasetTest:
 
 
 @pytest.fixture
+def hub_responses_partial_duckdb_index(hub_public_duckdb_index: str) -> HubDatasetTest:
+    return {
+        "name": hub_public_duckdb_index,
+        "config_names_response": create_config_names_response(hub_public_duckdb_index),
+        "splits_response": create_splits_response(hub_public_duckdb_index),
+        "first_rows_response": create_first_rows_response(hub_public_duckdb_index, TEXT_cols, TEXT_rows),
+        "parquet_and_info_response": create_parquet_and_info_response(
+            dataset=hub_public_duckdb_index, data_type="csv", partial=True
+        ),
+    }
+
+
+@pytest.fixture
 def hub_responses_gated_duckdb_index(hub_gated_duckdb_index: str) -> HubDatasetTest:
     return {
         "name": hub_gated_duckdb_index,
@@ -889,6 +904,19 @@ def hub_responses_gated_descriptive_statistics(hub_gated_descriptive_statistics:
         "name": hub_gated_descriptive_statistics,
         "config_names_response": create_config_names_response(hub_gated_descriptive_statistics),
         "splits_response": create_splits_response(hub_gated_descriptive_statistics),
+        "first_rows_response": None,
+        "parquet_and_info_response": None,
+    }
+
+
+@pytest.fixture
+def hub_responses_descriptive_statistics_string_text(
+    hub_public_descriptive_statistics_string_text: str,
+) -> HubDatasetTest:
+    return {
+        "name": hub_public_descriptive_statistics_string_text,
+        "config_names_response": create_config_names_response(hub_public_descriptive_statistics_string_text),
+        "splits_response": create_splits_response(hub_public_descriptive_statistics_string_text),
         "first_rows_response": None,
         "parquet_and_info_response": None,
     }

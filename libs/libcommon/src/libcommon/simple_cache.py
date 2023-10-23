@@ -2,26 +2,16 @@
 # Copyright 2022 The HuggingFace Authors.
 
 import types
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from http import HTTPStatus
-from typing import (
-    Any,
-    Dict,
-    Generic,
-    List,
-    Mapping,
-    NamedTuple,
-    Optional,
-    Set,
-    Type,
-    TypedDict,
-    TypeVar,
-    overload,
-)
+from typing import Any, Generic, NamedTuple, Optional, TypedDict, TypeVar, overload
 
 import pandas as pd
-from bson import ObjectId
+from bson import CodecOptions, ObjectId
+from bson.codec_options import TypeEncoder, TypeRegistry  # type: ignore[attr-defined]
 from bson.errors import InvalidId
 from mongoengine import Document
 from mongoengine.errors import DoesNotExist
@@ -43,12 +33,44 @@ from libcommon.constants import (
 )
 from libcommon.utils import JobParams, get_datetime
 
+
+class DateCodec(TypeEncoder):  # type: ignore[misc]
+    """To be able to save datetime.date objects like datetime.datetime objects in mongo"""
+
+    python_type = date  # the Python type acted upon by this type codec
+    transform_python = str  # convert date objects to strings in mongo
+
+
+class TimeCodec(TypeEncoder):  # type: ignore[misc]
+    """To be able to save datetime.time objects as strings in mongo"""
+
+    python_type = time  # the Python type acted upon by this type codec
+    transform_python = str  # convert time objects to strings in mongo
+
+
+class TimedeltaCodec(TypeEncoder):  # type: ignore[misc]
+    """To be able to save datetime.timedelta objects as strings in mongo"""
+
+    python_type = timedelta  # the Python type acted upon by this type codec
+    transform_python = str  # convert timedelta objects to strings in mongo
+
+
+class DecimalCodec(TypeEncoder):  # type: ignore[misc]
+    """To be able to save decimal.Decimal objects as strings in mongo"""
+
+    python_type = Decimal  # the Python type acted upon by this type codec
+    transform_python = str  # convert decimal objects to strings in mongo
+
+
+type_registry = TypeRegistry([DateCodec(), TimeCodec(), TimedeltaCodec(), DecimalCodec()])
+
+
 # START monkey patching ### hack ###
 # see https://github.com/sbdchd/mongo-types#install
 U = TypeVar("U", bound=Document)
 
 
-def no_op(self, x):  # type: ignore
+def no_op(self, _):  # type: ignore
     return self
 
 
@@ -56,7 +78,11 @@ QuerySet.__class_getitem__ = types.MethodType(no_op, QuerySet)
 
 
 class QuerySetManager(Generic[U]):
-    def __get__(self, instance: object, cls: Type[U]) -> QuerySet[U]:
+    def __get__(self, instance: object, cls: type[U]) -> QuerySet[U]:
+        codec_options = CodecOptions(type_registry=type_registry)  # type: ignore[call-arg]
+        cls._collection = cls._get_db().get_collection(  # type: ignore[attr-defined]
+            cls._get_collection_name(), codec_options=codec_options
+        )
         return QuerySet(cls, cls._get_collection())
 
 
@@ -100,7 +126,7 @@ class CachedResponseDocument(Document):
     http_status = EnumField(HTTPStatus, required=True)
     error_code = StringField()
     content = DictField(required=True)
-    dataset_git_revision = StringField()
+    dataset_git_revision = StringField(required=True)
     progress = FloatField(min_value=0.0, max_value=1.0)
     job_runner_version = IntField()
 
@@ -114,6 +140,7 @@ class CachedResponseDocument(Document):
             ("kind", "dataset", "config", "split"),
             ("dataset", "kind", "http_status"),
             ("kind", "http_status", "error_code"),
+            ("kind", "http_status", "_id"),
         ],
     }
     objects = QuerySetManager["CachedResponseDocument"]()
@@ -192,6 +219,7 @@ def decrease_metric_for_artifact(kind: str, dataset: str, config: Optional[str],
 def upsert_response(
     kind: str,
     dataset: str,
+    dataset_git_revision: str,
     content: Mapping[str, Any],
     http_status: HTTPStatus,
     config: Optional[str] = None,
@@ -199,7 +227,6 @@ def upsert_response(
     error_code: Optional[str] = None,
     details: Optional[Mapping[str, Any]] = None,
     job_runner_version: Optional[int] = None,
-    dataset_git_revision: Optional[str] = None,
     progress: Optional[float] = None,
     updated_at: Optional[datetime] = None,
 ) -> None:
@@ -262,12 +289,12 @@ T = TypeVar("T")
 
 
 @overload
-def _clean_nested_mongo_object(obj: Dict[str, T]) -> Dict[str, T]:
+def _clean_nested_mongo_object(obj: dict[str, T]) -> dict[str, T]:
     ...
 
 
 @overload
-def _clean_nested_mongo_object(obj: List[T]) -> List[T]:
+def _clean_nested_mongo_object(obj: list[T]) -> list[T]:
     ...
 
 
@@ -290,8 +317,8 @@ def _clean_nested_mongo_object(obj: Any) -> Any:
 
 class CacheEntryWithoutContent(TypedDict):
     http_status: HTTPStatus
+    dataset_git_revision: str
     error_code: Optional[str]
-    dataset_git_revision: Optional[str]
     progress: Optional[float]
     job_runner_version: Optional[int]
 
@@ -357,13 +384,33 @@ class CacheEntryWithDetails(CacheEntry):
     details: Mapping[str, str]
 
 
+class CachedArtifactNotFoundError(Exception):
+    kind: str
+    dataset: str
+    config: Optional[str]
+    split: Optional[str]
+
+    def __init__(
+        self,
+        kind: str,
+        dataset: str,
+        config: Optional[str],
+        split: Optional[str],
+    ):
+        super().__init__("The cache entry has not been found.")
+        self.kind = kind
+        self.dataset = dataset
+        self.config = config
+        self.split = split
+
+
 class CachedArtifactError(Exception):
     kind: str
     dataset: str
     config: Optional[str]
     split: Optional[str]
     cache_entry_with_details: CacheEntryWithDetails
-    enhanced_details: Dict[str, Any]
+    enhanced_details: dict[str, Any]
 
     def __init__(
         self,
@@ -380,7 +427,7 @@ class CachedArtifactError(Exception):
         self.config = config
         self.split = split
         self.cache_entry_with_details = cache_entry_with_details
-        self.enhanced_details: Dict[str, Any] = dict(self.cache_entry_with_details["details"].items())
+        self.enhanced_details: dict[str, Any] = dict(self.cache_entry_with_details["details"].items())
         self.enhanced_details["copied_from_artifact"] = {
             "kind": self.kind,
             "dataset": self.dataset,
@@ -441,6 +488,7 @@ def get_response_with_details(
 
 
 CACHED_RESPONSE_NOT_FOUND = "CachedResponseNotFound"
+DATASET_GIT_REVISION_NOT_FOUND = "dataset-git-revision-not-found"
 
 
 def get_response_or_missing_error(
@@ -457,7 +505,7 @@ def get_response_or_missing_error(
             },
             http_status=HTTPStatus.NOT_FOUND,
             error_code=CACHED_RESPONSE_NOT_FOUND,
-            dataset_git_revision=None,
+            dataset_git_revision=DATASET_GIT_REVISION_NOT_FOUND,
             job_runner_version=None,
             progress=None,
             details={},
@@ -472,7 +520,7 @@ class BestResponse:
 
 
 def get_best_response(
-    kinds: List[str], dataset: str, config: Optional[str] = None, split: Optional[str] = None
+    kinds: list[str], dataset: str, config: Optional[str] = None, split: Optional[str] = None
 ) -> BestResponse:
     """
     Get the best response from a list of cache kinds.
@@ -482,7 +530,7 @@ def get_best_response(
     - else: the first error response (including cache miss)
 
     Args:
-        kinds (`List[str]`):
+        kinds (`list[str]`):
             A non-empty list of cache kinds to look responses for.
         dataset (`str`):
             A namespace (user or an organization) and a repo name separated by a `/`.
@@ -520,10 +568,12 @@ def get_best_response(
 
 
 def get_previous_step_or_raise(
-    kinds: List[str], dataset: str, config: Optional[str] = None, split: Optional[str] = None
+    kinds: list[str], dataset: str, config: Optional[str] = None, split: Optional[str] = None
 ) -> BestResponse:
     """Get the previous step from the cache, or raise an exception if it failed."""
     best_response = get_best_response(kinds=kinds, dataset=dataset, config=config, split=split)
+    if "error_code" in best_response.response and best_response.response["error_code"] == CACHED_RESPONSE_NOT_FOUND:
+        raise CachedArtifactNotFoundError(kind=best_response.kind, dataset=dataset, config=config, split=split)
     if best_response.response["http_status"] != HTTPStatus.OK:
         raise CachedArtifactError(
             message="The previous step failed.",
@@ -536,12 +586,12 @@ def get_previous_step_or_raise(
     return best_response
 
 
-def get_valid_datasets(kind: str) -> Set[str]:
-    return set(CachedResponseDocument.objects(kind=kind, http_status=HTTPStatus.OK).distinct("dataset"))
+def get_all_datasets() -> set[str]:
+    return set(CachedResponseDocument.objects().distinct("dataset"))
 
 
 def has_any_successful_response(
-    kinds: List[str], dataset: str, config: Optional[str] = None, split: Optional[str] = None
+    kinds: list[str], dataset: str, config: Optional[str] = None, split: Optional[str] = None
 ) -> bool:
     return (
         CachedResponseDocument.objects(
@@ -561,7 +611,7 @@ class CountEntry(TypedDict):
     count: int
 
 
-def format_group(group: Dict[str, Any]) -> CountEntry:
+def format_group(group: dict[str, Any]) -> CountEntry:
     kind = group["kind"]
     if not isinstance(kind, str):
         raise TypeError("kind must be a str")
@@ -577,7 +627,7 @@ def format_group(group: Dict[str, Any]) -> CountEntry:
     return {"kind": kind, "http_status": http_status, "error_code": error_code, "count": count}
 
 
-def get_responses_count_by_kind_status_and_error_code() -> List[CountEntry]:
+def get_responses_count_by_kind_status_and_error_code() -> list[CountEntry]:
     groups = CachedResponseDocument.objects().aggregate(
         [
             {"$sort": {"kind": 1, "http_status": 1, "error_code": 1}},
@@ -606,6 +656,7 @@ def get_responses_count_by_kind_status_and_error_code() -> List[CountEntry]:
 class CacheReport(TypedDict):
     kind: str
     dataset: str
+    dataset_git_revision: str
     config: Optional[str]
     split: Optional[str]
     http_status: int
@@ -613,12 +664,11 @@ class CacheReport(TypedDict):
     details: Mapping[str, Any]
     updated_at: datetime
     job_runner_version: Optional[int]
-    dataset_git_revision: Optional[str]
     progress: Optional[float]
 
 
 class CacheReportsPage(TypedDict):
-    cache_reports: List[CacheReport]
+    cache_reports: list[CacheReport]
     next_cursor: str
 
 
@@ -685,7 +735,7 @@ def get_cache_reports(kind: str, cursor: Optional[str], limit: int) -> CacheRepo
     }
 
 
-def get_outdated_split_full_names_for_step(kind: str, current_version: int) -> List[SplitFullName]:
+def get_outdated_split_full_names_for_step(kind: str, current_version: int) -> list[SplitFullName]:
     responses = CachedResponseDocument.objects(kind=kind, job_runner_version__lt=current_version).only(
         "dataset", "config", "split"
     )
@@ -694,7 +744,7 @@ def get_outdated_split_full_names_for_step(kind: str, current_version: int) -> L
     ]
 
 
-def get_dataset_responses_without_content_for_kind(kind: str, dataset: str) -> List[CacheReport]:
+def get_dataset_responses_without_content_for_kind(kind: str, dataset: str) -> list[CacheReport]:
     responses = CachedResponseDocument.objects(kind=kind, dataset=dataset).exclude("content")
     return [
         {
@@ -719,7 +769,7 @@ class CacheReportWithContent(CacheReport):
 
 
 class CacheReportsWithContentPage(TypedDict):
-    cache_reports_with_content: List[CacheReportWithContent]
+    cache_reports_with_content: list[CacheReportWithContent]
     next_cursor: str
 
 
@@ -786,7 +836,7 @@ class CacheEntryFullMetadata(CacheEntryMetadata):
     split: Optional[str]
 
 
-def _get_df(entries: List[CacheEntryFullMetadata]) -> pd.DataFrame:
+def _get_df(entries: list[CacheEntryFullMetadata]) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "kind": pd.Series([entry["kind"] for entry in entries], dtype="category"),
@@ -808,7 +858,7 @@ def _get_df(entries: List[CacheEntryFullMetadata]) -> pd.DataFrame:
     # ^ does not seem optimal at all, but I get the types right
 
 
-def get_cache_entries_df(dataset: str, cache_kinds: Optional[List[str]] = None) -> pd.DataFrame:
+def get_cache_entries_df(dataset: str, cache_kinds: Optional[list[str]] = None) -> pd.DataFrame:
     filters = {}
     if cache_kinds:
         filters["kind__in"] = cache_kinds
@@ -842,13 +892,17 @@ def get_cache_entries_df(dataset: str, cache_kinds: Optional[List[str]] = None) 
     )
 
 
+def get_cache_count_for_dataset(dataset: str) -> int:
+    return CachedResponseDocument.objects(dataset=dataset).count()
+
+
 def has_some_cache(dataset: str) -> bool:
-    return CachedResponseDocument.objects(dataset=dataset).count() > 0
+    return get_cache_count_for_dataset(dataset) > 0
 
 
 def fetch_names(
-    dataset: str, config: Optional[str], cache_kinds: List[str], names_field: str, name_field: str
-) -> List[str]:
+    dataset: str, config: Optional[str], cache_kinds: list[str], names_field: str, name_field: str
+) -> list[str]:
     """
     Fetch a list of names from the cache database.
 
@@ -857,13 +911,13 @@ def fetch_names(
     Args:
         dataset (str): The dataset name.
         config (Optional[str]): The config name. Only needed for split names.
-        cache_kinds (List[str]): The cache kinds to fetch, eg ["dataset-config-names"],
+        cache_kinds (list[str]): The cache kinds to fetch, eg ["dataset-config-names"],
           or ["config-split-names-from-streaming", "config-split-names-from-info"].
         names_field (str): The name of the field containing the list of names, eg: "config_names", or "splits".
         name_field (str): The name of the field containing the name, eg: "config", or "split".
 
     Returns:
-        List[str]: The list of names.
+        list[str]: The list of names.
     """
     try:
         names = []
@@ -876,6 +930,38 @@ def fetch_names(
         return names
     except Exception:
         return []
+
+
+@dataclass
+class DatasetWithRevision:
+    dataset: str
+    revision: str
+
+
+def get_datasets_with_last_updated_kind(kind: str, days: int) -> list[DatasetWithRevision]:
+    """
+    Get the list of datasets for which an artifact of some kind has been updated in the last days.
+
+    Args:
+        kind (str): The kind of the cache entries.
+        days (int): The number of days to look back.
+
+    Returns:
+        list[DatasetWithRevision]: The list of datasets, with the git revision of the last artifact.
+    """
+
+    pipeline = [
+        {"$match": {"kind": kind, "http_status": HTTPStatus.OK, "updated_at": {"$gt": get_datetime(days=days)}}},
+        {"$sort": {"updated_at": 1}},
+        {"$group": {"_id": "$dataset", "revision": {"$last": "$dataset_git_revision"}}},
+        {"$project": {"dataset": "$_id", "_id": 0, "revision": 1}},
+    ]
+    return list(
+        DatasetWithRevision(dataset=response["dataset"], revision=response["revision"])
+        for response in CachedResponseDocument.objects(
+            kind=kind, http_status=HTTPStatus.OK, updated_at__gt=get_datetime(days=days)
+        ).aggregate(pipeline)
+    )
 
 
 # only for the tests

@@ -2,12 +2,14 @@
 # Copyright 2022 The HuggingFace Authors.
 
 import uvicorn
+from libapi.utils import EXPOSED_HEADERS
 from libcommon.log import init_logging
 from libcommon.processing_graph import ProcessingGraph
 from libcommon.resources import CacheMongoResource, QueueMongoResource, Resource
 from libcommon.storage import (
     exists,
     init_assets_dir,
+    init_cached_assets_dir,
     init_duckdb_index_cache_dir,
     init_hf_datasets_cache_dir,
     init_parquet_metadata_dir,
@@ -31,8 +33,15 @@ from admin.routes.dataset_status import create_dataset_status_endpoint
 from admin.routes.force_refresh import create_force_refresh_endpoint
 from admin.routes.healthcheck import healthcheck_endpoint
 from admin.routes.metrics import create_metrics_endpoint
+from admin.routes.num_dataset_infos_by_builder_name import (
+    create_num_dataset_infos_by_builder_name_endpoint,
+)
+from admin.routes.obsolete_cache import (
+    create_delete_obsolete_cache_endpoint,
+    create_get_obsolete_cache_endpoint,
+)
 from admin.routes.pending_jobs import create_pending_jobs_endpoint
-from admin.utils import EXPOSED_HEADERS
+from admin.routes.recreate_dataset import create_recreate_dataset_endpoint
 
 
 def create_app() -> Starlette:
@@ -41,6 +50,7 @@ def create_app() -> Starlette:
     init_logging(level=app_config.log.level)
     # ^ set first to have logs as soon as possible
     assets_directory = init_assets_dir(directory=app_config.assets.storage_directory)
+    cached_assets_directory = init_cached_assets_dir(directory=app_config.cached_assets.storage_directory)
     duckdb_index_cache_directory = init_duckdb_index_cache_dir(directory=app_config.duckdb_index.cache_directory)
     hf_datasets_cache_directory = init_hf_datasets_cache_dir(app_config.datasets_based.hf_datasets_cache)
     parquet_metadata_directory = init_parquet_metadata_dir(directory=app_config.parquet_metadata.storage_directory)
@@ -49,7 +59,10 @@ def create_app() -> Starlette:
     if not exists(assets_directory):
         raise RuntimeError("The assets storage directory could not be accessed. Exiting.")
 
-    processing_graph = ProcessingGraph(app_config.processing_graph.specification)
+    if not exists(cached_assets_directory):
+        raise RuntimeError("The cached-assets storage directory could not be accessed. Exiting.")
+
+    processing_graph = ProcessingGraph(app_config.processing_graph)
 
     cache_resource = CacheMongoResource(database=app_config.cache.mongo_database, host=app_config.cache.mongo_url)
     queue_resource = QueueMongoResource(database=app_config.queue.mongo_database, host=app_config.queue.mongo_url)
@@ -104,6 +117,7 @@ def create_app() -> Starlette:
                 external_auth_url=app_config.admin.external_auth_url,
                 organization=app_config.admin.hf_organization,
                 hf_timeout_seconds=app_config.admin.hf_timeout_seconds,
+                blocked_datasets=app_config.common.blocked_datasets,
             ),
             methods=["POST"],
         ),
@@ -130,6 +144,55 @@ def create_app() -> Starlette:
                 hf_timeout_seconds=app_config.admin.hf_timeout_seconds,
             ),
         ),
+        Route(
+            "/obsolete-cache",
+            endpoint=create_get_obsolete_cache_endpoint(
+                hf_endpoint=app_config.common.hf_endpoint,
+                max_age=app_config.admin.max_age,
+                external_auth_url=app_config.admin.external_auth_url,
+                organization=app_config.admin.hf_organization,
+                hf_timeout_seconds=app_config.admin.hf_timeout_seconds,
+                hf_token=app_config.common.hf_token,
+            ),
+        ),
+        Route(
+            "/obsolete-cache",
+            endpoint=create_delete_obsolete_cache_endpoint(
+                hf_endpoint=app_config.common.hf_endpoint,
+                max_age=app_config.admin.max_age,
+                assets_directory=assets_directory,
+                cached_assets_directory=cached_assets_directory,
+                external_auth_url=app_config.admin.external_auth_url,
+                organization=app_config.admin.hf_organization,
+                hf_timeout_seconds=app_config.admin.hf_timeout_seconds,
+                hf_token=app_config.common.hf_token,
+            ),
+            methods=["DELETE"],
+        ),
+        Route(
+            "/num-dataset-infos-by-builder-name",
+            endpoint=create_num_dataset_infos_by_builder_name_endpoint(
+                max_age=app_config.admin.max_age,
+                external_auth_url=app_config.admin.external_auth_url,
+                organization=app_config.admin.hf_organization,
+                hf_timeout_seconds=app_config.admin.hf_timeout_seconds,
+            ),
+        ),
+        Route(
+            "/recreate-dataset",
+            endpoint=create_recreate_dataset_endpoint(
+                processing_graph=processing_graph,
+                assets_directory=assets_directory,
+                cached_assets_directory=cached_assets_directory,
+                hf_endpoint=app_config.common.hf_endpoint,
+                hf_token=app_config.common.hf_token,
+                external_auth_url=app_config.admin.external_auth_url,
+                organization=app_config.admin.hf_organization,
+                hf_timeout_seconds=app_config.admin.hf_timeout_seconds,
+                blocked_datasets=app_config.common.blocked_datasets,
+            ),
+            methods=["POST"],
+        ),
     ]
     for processing_step in processing_graph.get_processing_steps():
         # beware: here we assume 1-1 mapping between processing steps and cache kinds (and job types)
@@ -145,6 +208,8 @@ def create_app() -> Starlette:
                         input_type=input_type,
                         job_type=job_type,
                         difficulty=processing_step.difficulty,
+                        bonus_difficulty_if_dataset_is_big=processing_step.bonus_difficulty_if_dataset_is_big,
+                        processing_graph=processing_graph,
                         hf_endpoint=app_config.common.hf_endpoint,
                         hf_token=app_config.common.hf_token,
                         external_auth_url=app_config.admin.external_auth_url,

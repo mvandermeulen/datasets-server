@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2023 The HuggingFace Authors.
 
+import copy
 import logging
 import os
 from pathlib import Path
-from typing import Any, List, Optional, Set
+from typing import Any, Optional
 
 import duckdb
+from datasets.features.features import Features, FeatureType, Value, _visit
 from huggingface_hub import hf_hub_download
 from huggingface_hub._commit_api import (
     CommitOperation,
@@ -15,14 +17,16 @@ from huggingface_hub._commit_api import (
 )
 from huggingface_hub.hf_api import HfApi
 from huggingface_hub.utils._errors import HfHubHTTPError, RepositoryNotFoundError
-from libcommon.constants import PROCESSING_STEP_SPLIT_DUCKDB_INDEX_VERSION
+from libcommon.constants import (
+    DUCKDB_INDEX_JOB_RUNNER_SUBDIRECTORY,
+    PROCESSING_STEP_SPLIT_DUCKDB_INDEX_VERSION,
+)
 from libcommon.exceptions import (
     CacheDirectoryNotInitializedError,
     CreateCommitError,
     DatasetNotFoundError,
     DuckDBIndexFileNotFoundError,
     LockedDatasetTimeoutError,
-    NoIndexableColumnsError,
     ParquetResponseEmptyError,
     PreviousStepFormatError,
     SplitWithTooBigParquetError,
@@ -39,7 +43,6 @@ from worker.job_runners.split.split_job_runner import SplitJobRunnerWithCache
 from worker.utils import (
     HF_HUB_HTTP_ERROR_RETRY_SLEEPS,
     LOCK_GIT_BRANCH_RETRY_SLEEPS,
-    check_split_exists,
     create_branch,
     hf_hub_url,
     retry,
@@ -61,6 +64,23 @@ HUB_DOWNLOAD_CACHE_FOLDER = "cache"
 
 class DuckdbIndexWithFeatures(SplitHubFile):
     features: Optional[dict[str, Any]]
+    has_fts: bool
+
+
+def get_indexable_columns(features: Features) -> list[str]:
+    indexable_columns: list[str] = []
+    for column, feature in features.items():
+        indexable = False
+
+        def check_indexable(feature: FeatureType) -> None:
+            nonlocal indexable
+            if isinstance(feature, Value) and feature.dtype == "string":
+                indexable = True
+
+        _visit(feature, check_indexable)
+        if indexable:
+            indexable_columns.append(column)
+    return indexable_columns
 
 
 def compute_index_rows(
@@ -79,7 +99,6 @@ def compute_index_rows(
     committer_hf_token: Optional[str],
 ) -> DuckdbIndexWithFeatures:
     logging.info(f"get split-duckdb-index for dataset={dataset} config={config} split={split}")
-    check_split_exists(dataset=dataset, config=config, split=split)
 
     # get parquet urls and dataset_info
     config_parquet_and_info_step = "config-parquet-and-info"
@@ -108,21 +127,19 @@ def compute_index_rows(
         if not parquet_file_names:
             raise ParquetResponseEmptyError("No parquet files found.")
 
+        # For directories like "partial-train" for the file at "en/partial-train/0000.parquet" in the C4 dataset.
+        # Note that "-" is forbidden for split names so it doesn't create directory names collisions.
+        split_directory = split_parquet_files[0]["url"].rsplit("/", 2)[1]
+
         # get the features
         features = content_parquet_and_info["dataset_info"]["features"]
-        column_names = ",".join('"' + column + '"' for column in list(features.keys()))
+        column_names = ",".join(f'"{column}"' for column in features)
 
-        # look for string columns
-        string_columns = [
-            column
-            for column, feature in features.items()
-            if "dtype" in feature
-            and "_type" in feature
-            and feature["dtype"] == STRING_FEATURE_DTYPE
-            and feature["_type"] == VALUE_FEATURE_TYPE
-        ]
-        if not string_columns:
-            raise NoIndexableColumnsError("No string columns available to index.")
+        # look for indexable columns (= possibly nested columns containing string data)
+        # copy the features is needed but will be fixed with https://github.com/huggingface/datasets/pull/6189
+        indexable_columns = ",".join(
+            f'"{column}"' for column in get_indexable_columns(Features.from_dict(copy.deepcopy(features)))
+        )
 
     except KeyError as e:
         raise PreviousStepFormatError(
@@ -137,8 +154,6 @@ def compute_index_rows(
     if extensions_directory is not None:
         con.execute(SET_EXTENSIONS_DIRECTORY_COMMAND.format(directory=extensions_directory))
 
-    con.execute(INSTALL_EXTENSION_COMMAND.format(extension="httpfs"))
-    con.execute(LOAD_EXTENSION_COMMAND.format(extension="httpfs"))
     con.execute(INSTALL_EXTENSION_COMMAND.format(extension="fts"))
     con.execute(LOAD_EXTENSION_COMMAND.format(extension="fts"))
 
@@ -152,28 +167,32 @@ def compute_index_rows(
             repo_type=REPO_TYPE,
             revision=target_revision,
             repo_id=dataset,
-            filename=f"{config}/{split}/{parquet_file}",
+            filename=f"{config}/{split_directory}/{parquet_file}",
             local_dir=duckdb_index_file_directory,
             local_dir_use_symlinks=False,
             token=hf_token,
             cache_dir=duckdb_index_file_directory,
+            force_download=True,
+            resume_download=False,
         )
 
-    all_split_parquets = f"{duckdb_index_file_directory}/{config}/{split}/*.parquet"
+    all_split_parquets = f"{duckdb_index_file_directory}/{config}/{split_directory}/*.parquet"
     create_command_sql = f"{CREATE_TABLE_COMMAND.format(columns=column_names)} '{all_split_parquets}';"
     logging.debug(create_command_sql)
     con.sql(create_command_sql)
 
-    # TODO: by default, 'porter' stemmer is being used, use a specific one by dataset language in the future
-    # see https://duckdb.org/docs/extensions/full_text_search.html for more details about 'stemmer' parameter
-    create_index_sql = CREATE_INDEX_COMMAND.format(columns=column_names)
-    logging.debug(create_index_sql)
-    con.sql(create_index_sql)
+    is_indexable = len(indexable_columns) > 0
+    if is_indexable:
+        # TODO: by default, 'porter' stemmer is being used, use a specific one by dataset language in the future
+        # see https://duckdb.org/docs/extensions/full_text_search.html for more details about 'stemmer' parameter
+        create_index_sql = CREATE_INDEX_COMMAND.format(columns=indexable_columns)
+        logging.debug(create_index_sql)
+        con.sql(create_index_sql)
     con.close()
 
     hf_api = HfApi(endpoint=hf_endpoint, token=hf_token)
     committer_hf_api = HfApi(endpoint=hf_endpoint, token=committer_hf_token)
-    index_file_location = f"{config}/{split}/{DUCKDB_DEFAULT_INDEX_FILENAME}"
+    index_file_location = f"{config}/{split_directory}/{DUCKDB_DEFAULT_INDEX_FILENAME}"
 
     try:
         with lock.git_branch(
@@ -189,14 +208,14 @@ def compute_index_rows(
 
             logging.debug(f"get dataset info for {dataset=} with {target_revision=}")
             target_dataset_info = hf_api.dataset_info(repo_id=dataset, revision=target_revision, files_metadata=False)
-            all_repo_files: Set[str] = {f.rfilename for f in target_dataset_info.siblings}
-            delete_operations: List[CommitOperation] = []
+            all_repo_files: set[str] = {f.rfilename for f in target_dataset_info.siblings}
+            delete_operations: list[CommitOperation] = []
             if index_file_location in all_repo_files:
                 delete_operations.append(CommitOperationDelete(path_in_repo=index_file_location))
             logging.debug(f"delete operations for {dataset=} {delete_operations=}")
 
             # send the files to the target revision
-            add_operations: List[CommitOperation] = [
+            add_operations: list[CommitOperation] = [
                 CommitOperationAdd(path_in_repo=index_file_location, path_or_fileobj=db_path.resolve())
             ]
             logging.debug(f"add operations for {dataset=} {add_operations=}")
@@ -263,6 +282,7 @@ def compute_index_rows(
         filename=Path(repo_file.rfilename).name,
         size=repo_file.size,
         features=features,
+        has_fts=is_indexable,
     )
 
 
@@ -280,7 +300,7 @@ class SplitDuckDbIndexJobRunner(SplitJobRunnerWithCache):
             job_info=job_info,
             app_config=app_config,
             processing_step=processing_step,
-            cache_directory=Path(duckdb_index_cache_directory),
+            cache_directory=Path(duckdb_index_cache_directory) / DUCKDB_INDEX_JOB_RUNNER_SUBDIRECTORY,
         )
         self.duckdb_index_config = app_config.duckdb_index
 

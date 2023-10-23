@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2022 The HuggingFace Authors.
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
+from libcommon.config import ProcessingGraphConfig
 from libcommon.processing_graph import ProcessingGraph, ProcessingStep
 from libcommon.queue import _clean_queue_database
 from libcommon.resources import CacheMongoResource, QueueMongoResource
@@ -61,6 +62,19 @@ def monkeypatch_session() -> Iterator[MonkeyPatch]:
     mp.undo()
 
 
+@fixture()
+def use_hub_prod_endpoint() -> Iterator[MonkeyPatch]:
+    mp = MonkeyPatch()
+    mp.setattr(
+        "huggingface_hub.file_download.HUGGINGFACE_CO_URL_TEMPLATE",
+        "https://huggingface.co/{repo_id}/resolve/{revision}/{filename}",
+    )
+    # ^ see https://github.com/huggingface/datasets/pull/5196#issuecomment-1322191056
+    mp.setattr("datasets.config.HF_ENDPOINT", "https://huggingface.co")
+    yield mp
+    mp.undo()
+
+
 # see https://github.com/pytest-dev/pytest/issues/363#issuecomment-406536200
 @fixture
 def set_env_vars(
@@ -74,7 +88,8 @@ def set_env_vars(
     mp.setenv("ASSETS_BASE_URL", "http://localhost/assets")
     mp.setenv("FIRST_ROWS_MAX_NUMBER", "7")
     mp.setenv("PARQUET_AND_INFO_MAX_DATASET_SIZE", "10_000")
-    mp.setenv("DESCRIPTIVE_STATISTICS_MAX_PARQUET_SIZE_BYTES", "10_000")
+    mp.setenv("DESCRIPTIVE_STATISTICS_MAX_PARQUET_SIZE_BYTES", "20_000")
+    mp.setenv("DESCRIPTIVE_STATISTICS_HISTOGRAM_NUM_BINS", "10")
     mp.setenv("PARQUET_AND_INFO_MAX_EXTERNAL_DATA_FILES", "10")
     mp.setenv("PARQUET_AND_INFO_COMMITTER_HF_TOKEN", CI_PARQUET_CONVERTER_APP_TOKEN)
     mp.setenv("DUCKDB_INDEX_COMMITTER_HF_TOKEN", CI_PARQUET_CONVERTER_APP_TOKEN)
@@ -140,10 +155,12 @@ def duckdb_index_cache_directory(app_config: AppConfig) -> StrPath:
 @fixture
 def test_processing_graph() -> ProcessingGraph:
     return ProcessingGraph(
-        {
-            "dummy": {"input_type": "dataset"},
-            "dummy2": {"input_type": "dataset"},
-        }
+        ProcessingGraphConfig(
+            {
+                "dummy": {"input_type": "dataset"},
+                "dummy2": {"input_type": "dataset"},
+            }
+        )
     )
 
 

@@ -8,7 +8,9 @@ from typing import Optional
 from libcommon.config import CommonConfig
 from libcommon.exceptions import (
     CustomError,
+    DatasetInBlockListError,
     DatasetNotFoundError,
+    DatasetScriptError,
     JobManagerCrashedError,
     JobManagerExceededMaximumDurationError,
     ResponseAlreadyComputedError,
@@ -26,6 +28,7 @@ from libcommon.utils import JobInfo, JobParams, JobResult, Priority, orjson_dump
 
 from worker.config import AppConfig, WorkerConfig
 from worker.job_runner import JobRunner
+from worker.utils import is_dataset_script_error
 
 
 class JobManager:
@@ -105,6 +108,7 @@ class JobManager:
 
     def run_job(self) -> JobResult:
         try:
+            self.job_runner.validate()
             job_result: JobResult = self.process()
         except Exception:
             job_result = {
@@ -118,10 +122,14 @@ class JobManager:
         return job_result
 
     def finish(self, job_result: JobResult) -> None:
-        DatasetOrchestrator(
-            dataset=self.job_params["dataset"],
-            processing_graph=self.processing_graph,
-        ).finish_job(job_result=job_result)
+        try:
+            DatasetOrchestrator(
+                dataset=self.job_params["dataset"],
+                processing_graph=self.processing_graph,
+                blocked_datasets=self.common_config.blocked_datasets,
+            ).finish_job(job_result=job_result)
+        except DatasetInBlockListError:
+            self.debug("The dataset is blocked and has been deleted from the Datasets Server.")
 
     def raise_if_parallel_response_exists(self, parallel_cache_kind: str, parallel_job_version: int) -> None:
         try:
@@ -213,7 +221,13 @@ class JobManager:
                 },
             }
         except Exception as err:
-            e = err if isinstance(err, CustomError) else UnexpectedError(str(err), err)
+            e = (
+                err
+                if isinstance(err, CustomError)
+                else DatasetScriptError(str(err), err)
+                if is_dataset_script_error()
+                else UnexpectedError(str(err), err)
+            )
             self.debug(f"response for job_info={self.job_info} had an error")
             return {
                 "job_info": self.job_info,

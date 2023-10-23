@@ -50,6 +50,11 @@ images:
       useGlobalRegistry: false
       repository: datasets-server-services-search
       tag: sha-fb3399a
+    sseApi:
+      registry: huggingface
+      useGlobalRegistry: false
+      repository: datasets-server-services-sse-api
+      tag: sha-fb3399a
     storageAdmin:
       registry: huggingface
       useGlobalRegistry: false
@@ -73,6 +78,8 @@ secrets:
       WEBHOOK_SECRET: "hub-ephemeral-datasets-server-webhook-secret"
       SPAWNING_TOKEN: "hub-ephemeral-datasets-server-spawning-token"
       API_HF_JWT_ADDITIONAL_PUBLIC_KEYS: "hub-ephemeral-datasets-server-jwt-additional-public-keys"
+      AWS_ACCESS_KEY_ID: "hub-ephemeral-datasets-server-s3-access-key-id"
+      AWS_SECRET_ACCESS_KEY: "hub-ephemeral-datasets-server-s3-secret-access-key"
   mongoUrl:
     fromSecret: true
     secretName: "datasets-server-staging-secrets"
@@ -91,8 +98,17 @@ secrets:
   spawningToken:
     fromSecret: true
     secretName: "datasets-server-staging-secrets"
+  s3:
+    accessKeyId:
+      fromSecret: true
+      secretName: "datasets-server-staging-secrets"
+    secretAccessKey:
+      fromSecret: true
+      secretName: "datasets-server-staging-secrets"
 
 persistence:
+  cachedAssets:
+    existingClaim: "datasets-server-cached-assets-pvc"
   descriptiveStatistics:
     existingClaim: "datasets-server-statistics-pvc"
   duckDBIndex:
@@ -124,6 +140,9 @@ firstRows:
 parquetAndInfo:
   maxDatasetSize: "500_000_000"
 
+s3:
+  bucket: "hf-datasets-server-statics-staging"
+
 # --- jobs (pre-install/upgrade hooks) ---
 
 mongodbMigration:
@@ -137,7 +156,7 @@ mongodbMigration:
 
 cacheMaintenance:
   action: "skip"
-  # ^ allowed values are {skip,backfill,upgrade}
+  # ^ allowed values are {backfill, collect-queue-metrics, collect-cache-metrics, clean-directory, post-messages, skip}
   log:
     level: "debug"
   backfill:
@@ -156,14 +175,12 @@ queueMetricsCollector:
   action: "collect-queue-metrics"
   schedule: "*/10 * * * *"
   # every ten minutes, then it will be changed to default
-  nodeSelector: {}
   resources:
     requests:
       cpu: 1
     limits:
       cpu: 1
       memory: "512Mi"
-  tolerations: []
 
 # --- storage admin (to manually inspect the storage, in /data) ---
 
@@ -190,17 +207,13 @@ reverseProxy:
       memory: "256Mi"
   service:
     type: NodePort
-  tolerations:
-    - key: CriticalAddonsOnly
-      operator: Equal
 
 ingress:
   tls:
     - hosts:
-      - "datasets-server.us.dev.moon.huggingface.tech"
+        - "datasets-server.us.dev.moon.huggingface.tech"
   annotations:
     # Link to Route53 - we could set any subdomain to us.dev.moon.huggingface.tech (common zone to the k8s cluster)
-    external-dns.alpha.kubernetes.io/hostname: "datasets-server.us.dev.moon.huggingface.tech"
     alb.ingress.kubernetes.io/load-balancer-name: "hub-datasets-server-staging"
     alb.ingress.kubernetes.io/tags: "Env=staging,Project=datasets-server,Terraform=true"
     alb.ingress.kubernetes.io/healthcheck-path: "/healthcheck"
@@ -213,7 +226,6 @@ ingress:
 
 admin:
   uvicornNumWorkers: "1"
-
   replicas: 1
   service:
     type: NodePort
@@ -227,7 +239,6 @@ admin:
 
 api:
   uvicornNumWorkers: "1"
-
   replicas: 1
   service:
     type: NodePort
@@ -241,7 +252,6 @@ api:
 
 rows:
   uvicornNumWorkers: "1"
-
   replicas: 1
   service:
     type: NodePort
@@ -267,13 +277,11 @@ search:
       memory: "4Gi"
 
 workers:
-  -
-    deployName: "all"
+  - deployName: "all"
     workerDifficultyMax: 100
     workerDifficultyMin: 0
     workerJobTypesBlocked: ""
     workerJobTypesOnly: ""
-    nodeSelector: {}
     replicas: 1
     resources:
       requests:
@@ -282,14 +290,11 @@ workers:
       limits:
         cpu: 1
         memory: "4Gi"
-    tolerations: []
-  -
-    deployName: "light"
+  - deployName: "light"
     workerDifficultyMax: 40
     workerDifficultyMin: 0
     workerJobTypesBlocked: ""
     workerJobTypesOnly: ""
-    nodeSelector: {}
     replicas: 1
     resources:
       requests:
@@ -298,4 +303,3 @@ workers:
       limits:
         cpu: 1
         memory: "4Gi"
-    tolerations: []

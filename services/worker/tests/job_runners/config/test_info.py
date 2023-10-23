@@ -1,18 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2022 The HuggingFace Authors.
 
+from collections.abc import Callable
 from http import HTTPStatus
-from typing import Any, Callable
+from typing import Any
 
 import pytest
+from libcommon.config import ProcessingGraphConfig
 from libcommon.exceptions import PreviousStepFormatError
 from libcommon.processing_graph import ProcessingGraph
 from libcommon.resources import CacheMongoResource, QueueMongoResource
-from libcommon.simple_cache import CachedArtifactError, upsert_response
+from libcommon.simple_cache import (
+    CachedArtifactError,
+    CachedArtifactNotFoundError,
+    upsert_response,
+)
 from libcommon.utils import Priority
 
 from worker.config import AppConfig
 from worker.job_runners.config.info import ConfigInfoJobRunner
+
+from ..utils import REVISION_NAME
 
 
 @pytest.fixture(autouse=True)
@@ -143,21 +151,32 @@ def get_job_runner(
     ) -> ConfigInfoJobRunner:
         processing_step_name = ConfigInfoJobRunner.get_job_type()
         processing_graph = ProcessingGraph(
-            {
-                "dataset-level": {"input_type": "dataset"},
-                processing_step_name: {
-                    "input_type": "dataset",
-                    "job_runner_version": ConfigInfoJobRunner.get_job_runner_version(),
-                    "triggered_by": "dataset-level",
-                },
-            }
+            ProcessingGraphConfig(
+                {
+                    "dataset-level": {"input_type": "dataset"},
+                    processing_step_name: {
+                        "input_type": "dataset",
+                        "job_runner_version": ConfigInfoJobRunner.get_job_runner_version(),
+                        "triggered_by": "dataset-level",
+                    },
+                }
+            )
         )
+
+        upsert_response(
+            kind="dataset-config-names",
+            dataset=dataset,
+            dataset_git_revision=REVISION_NAME,
+            content={"config_names": [{"dataset": dataset, "config": config}]},
+            http_status=HTTPStatus.OK,
+        )
+
         return ConfigInfoJobRunner(
             job_info={
                 "type": ConfigInfoJobRunner.get_job_type(),
                 "params": {
                     "dataset": dataset,
-                    "revision": "revision",
+                    "revision": REVISION_NAME,
                     "config": config,
                     "split": None,
                 },
@@ -218,6 +237,7 @@ def test_compute(
     upsert_response(
         kind="config-parquet-and-info",
         dataset=dataset,
+        dataset_git_revision=REVISION_NAME,
         config=config,
         content=upstream_content,
         http_status=upstream_status,
@@ -234,5 +254,5 @@ def test_compute(
 def test_doesnotexist(app_config: AppConfig, get_job_runner: GetJobRunner) -> None:
     dataset = config = "doesnotexist"
     job_runner = get_job_runner(dataset, config, app_config)
-    with pytest.raises(CachedArtifactError):
+    with pytest.raises(CachedArtifactNotFoundError):
         job_runner.compute()

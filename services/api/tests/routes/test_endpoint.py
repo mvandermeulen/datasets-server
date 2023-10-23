@@ -5,6 +5,7 @@ from http import HTTPStatus
 from unittest.mock import patch
 
 from libapi.exceptions import ResponseNotReadyError
+from libapi.utils import get_cache_entry_from_steps
 from libcommon.config import ProcessingGraphConfig
 from libcommon.processing_graph import ProcessingGraph
 from libcommon.queue import Queue
@@ -12,14 +13,14 @@ from libcommon.simple_cache import upsert_response
 from pytest import raises
 
 from api.config import AppConfig, EndpointConfig
-from api.routes.endpoint import EndpointsDefinition, get_cache_entry_from_steps
+from api.routes.endpoint import EndpointsDefinition
 
 CACHE_MAX_DAYS = 90
 
 
 def test_endpoints_definition() -> None:
     config = ProcessingGraphConfig()
-    graph = ProcessingGraph(config.specification)
+    graph = ProcessingGraph(config)
     endpoint_config = EndpointConfig.from_env()
 
     endpoints_definition = EndpointsDefinition(graph, endpoint_config)
@@ -102,7 +103,7 @@ def test_get_cache_entry_from_steps() -> None:
 
     app_config = AppConfig.from_env()
     graph_config = ProcessingGraphConfig()
-    processing_graph = ProcessingGraph(graph_config.specification)
+    processing_graph = ProcessingGraph(graph_config)
 
     cache_with_error = "config-split-names-from-streaming"
     cache_without_error = "config-split-names-from-info"
@@ -113,6 +114,7 @@ def test_get_cache_entry_from_steps() -> None:
     upsert_response(
         kind=cache_without_error,
         dataset=dataset,
+        dataset_git_revision=revision,
         config=config,
         content={},
         http_status=HTTPStatus.OK,
@@ -121,6 +123,7 @@ def test_get_cache_entry_from_steps() -> None:
     upsert_response(
         kind=cache_with_error,
         dataset=dataset,
+        dataset_git_revision=revision,
         config=config,
         content={},
         http_status=HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -135,6 +138,7 @@ def test_get_cache_entry_from_steps() -> None:
         processing_graph=processing_graph,
         hf_endpoint=app_config.common.hf_endpoint,
         cache_max_days=CACHE_MAX_DAYS,
+        blocked_datasets=[],
     )
     assert result
     assert result["http_status"] == HTTPStatus.OK
@@ -148,6 +152,7 @@ def test_get_cache_entry_from_steps() -> None:
         processing_graph=processing_graph,
         hf_endpoint=app_config.common.hf_endpoint,
         cache_max_days=CACHE_MAX_DAYS,
+        blocked_datasets=[],
     )
     assert result
     assert result["http_status"] == HTTPStatus.OK
@@ -161,6 +166,7 @@ def test_get_cache_entry_from_steps() -> None:
         processing_graph=processing_graph,
         hf_endpoint=app_config.common.hf_endpoint,
         cache_max_days=CACHE_MAX_DAYS,
+        blocked_datasets=[],
     )
     assert result
     assert result["http_status"] == HTTPStatus.INTERNAL_SERVER_ERROR
@@ -180,4 +186,5 @@ def test_get_cache_entry_from_steps() -> None:
                 processing_graph=processing_graph,
                 hf_endpoint=app_config.common.hf_endpoint,
                 cache_max_days=CACHE_MAX_DAYS,
+                blocked_datasets=[],
             )

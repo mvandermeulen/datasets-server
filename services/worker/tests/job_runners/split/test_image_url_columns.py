@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2023 The HuggingFace Authors.
 
+from collections.abc import Callable, Mapping
 from http import HTTPStatus
-from typing import Any, Callable, Mapping
+from typing import Any
 
 import pytest
+from libcommon.config import ProcessingGraphConfig
 from libcommon.constants import (
     PROCESSING_STEP_SPLIT_FIRST_ROWS_FROM_STREAMING_VERSION,
     PROCESSING_STEP_SPLIT_IMAGE_URL_COLUMNS_VERSION,
@@ -19,6 +21,7 @@ from worker.dtos import ImageUrlColumnsResponse
 from worker.job_runners.split.image_url_columns import SplitImageUrlColumnsJobRunner
 
 from ...fixtures.hub import get_default_config_split
+from ..utils import REVISION_NAME
 
 GetJobRunner = Callable[[str, str, str, AppConfig], SplitImageUrlColumnsJobRunner]
 
@@ -36,22 +39,42 @@ def get_job_runner(
     ) -> SplitImageUrlColumnsJobRunner:
         processing_step_name = SplitImageUrlColumnsJobRunner.get_job_type()
         processing_graph = ProcessingGraph(
-            {
-                "dataset-level": {"input_type": "dataset"},
-                "config-level": {"input_type": "dataset", "triggered_by": "dataset-level"},
-                processing_step_name: {
-                    "input_type": "dataset",
-                    "job_runner_version": SplitImageUrlColumnsJobRunner.get_job_runner_version(),
-                    "triggered_by": "config-level",
-                },
-            }
+            ProcessingGraphConfig(
+                {
+                    "dataset-level": {"input_type": "dataset"},
+                    "config-level": {"input_type": "dataset", "triggered_by": "dataset-level"},
+                    processing_step_name: {
+                        "input_type": "dataset",
+                        "job_runner_version": SplitImageUrlColumnsJobRunner.get_job_runner_version(),
+                        "triggered_by": "config-level",
+                    },
+                }
+            )
         )
+
+        upsert_response(
+            kind="dataset-config-names",
+            dataset=dataset,
+            dataset_git_revision=REVISION_NAME,
+            content={"config_names": [{"dataset": dataset, "config": config}]},
+            http_status=HTTPStatus.OK,
+        )
+
+        upsert_response(
+            kind="config-split-names-from-streaming",
+            dataset=dataset,
+            dataset_git_revision=REVISION_NAME,
+            config=config,
+            content={"splits": [{"dataset": dataset, "config": config, "split": split}]},
+            http_status=HTTPStatus.OK,
+        )
+
         return SplitImageUrlColumnsJobRunner(
             job_info={
                 "type": SplitImageUrlColumnsJobRunner.get_job_type(),
                 "params": {
                     "dataset": dataset,
-                    "revision": "revision",
+                    "revision": REVISION_NAME,
                     "config": config,
                     "split": split,
                 },
@@ -198,7 +221,7 @@ def test_compute(
         config=config,
         split=split,
         content=upstream_content,
-        dataset_git_revision="dataset_git_revision",
+        dataset_git_revision=REVISION_NAME,
         job_runner_version=PROCESSING_STEP_SPLIT_FIRST_ROWS_FROM_STREAMING_VERSION,
         progress=1.0,
         http_status=HTTPStatus.OK,
@@ -211,7 +234,7 @@ def test_compute(
 @pytest.mark.parametrize(
     "dataset,upstream_content,upstream_status,exception_name",
     [
-        ("doesnotexist", {}, HTTPStatus.OK, "CachedArtifactError"),
+        ("doesnotexist", {}, HTTPStatus.OK, "CachedArtifactNotFoundError"),
         ("wrong_format", {}, HTTPStatus.OK, "PreviousStepFormatError"),
         (
             "upstream_failed",
@@ -243,7 +266,7 @@ def test_compute_failed(
             config=config,
             split=split,
             content=upstream_content,
-            dataset_git_revision="dataset_git_revision",
+            dataset_git_revision=REVISION_NAME,
             job_runner_version=PROCESSING_STEP_SPLIT_IMAGE_URL_COLUMNS_VERSION,
             progress=1.0,
             http_status=upstream_status,

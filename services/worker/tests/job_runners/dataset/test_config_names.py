@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2022 The HuggingFace Authors.
 
+from collections.abc import Callable
 from dataclasses import replace
-from typing import Callable
 from unittest.mock import patch
 
 import pytest
+from libcommon.config import ProcessingGraphConfig
 from libcommon.exceptions import CustomError
 from libcommon.processing_graph import ProcessingGraph
 from libcommon.resources import CacheMongoResource, QueueMongoResource
@@ -16,6 +17,7 @@ from worker.job_runners.dataset.config_names import DatasetConfigNamesJobRunner
 from worker.resources import LibrariesResource
 
 from ...fixtures.hub import HubDatasetTest
+from ..utils import REVISION_NAME
 
 GetJobRunner = Callable[[str, AppConfig], DatasetConfigNamesJobRunner]
 
@@ -32,19 +34,21 @@ def get_job_runner(
     ) -> DatasetConfigNamesJobRunner:
         processing_step_name = DatasetConfigNamesJobRunner.get_job_type()
         processing_graph = ProcessingGraph(
-            {
-                processing_step_name: {
-                    "input_type": "dataset",
-                    "job_runner_version": DatasetConfigNamesJobRunner.get_job_runner_version(),
+            ProcessingGraphConfig(
+                {
+                    processing_step_name: {
+                        "input_type": "dataset",
+                        "job_runner_version": DatasetConfigNamesJobRunner.get_job_runner_version(),
+                    }
                 }
-            }
+            )
         )
         return DatasetConfigNamesJobRunner(
             job_info={
                 "type": DatasetConfigNamesJobRunner.get_job_type(),
                 "params": {
                     "dataset": dataset,
-                    "revision": "revision",
+                    "revision": REVISION_NAME,
                     "config": None,
                     "split": None,
                 },

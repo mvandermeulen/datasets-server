@@ -4,6 +4,8 @@
 import logging
 from typing import Optional
 
+from libapi.exceptions import ApiError, InvalidParameterError, UnexpectedApiError
+from libapi.utils import Endpoint, get_json_api_error_response, get_json_ok_response
 from libcommon.simple_cache import (
     InvalidCursor,
     InvalidLimit,
@@ -13,14 +15,6 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from admin.authentication import auth_check
-from admin.utils import (
-    AdminCustomError,
-    Endpoint,
-    InvalidParameterError,
-    UnexpectedError,
-    get_json_admin_error_response,
-    get_json_ok_response,
-)
 
 
 def create_cache_reports_with_content_endpoint(
@@ -36,7 +30,7 @@ def create_cache_reports_with_content_endpoint(
             cursor = request.query_params.get("cursor") or ""
             logging.info(f"Cache reports with content for {cache_kind}, cursor={cursor}")
             # if auth_check fails, it will raise an exception that will be caught below
-            auth_check(
+            await auth_check(
                 external_auth_url=external_auth_url,
                 request=request,
                 organization=organization,
@@ -54,12 +48,12 @@ def create_cache_reports_with_content_endpoint(
             except InvalidCursor as e:
                 raise InvalidParameterError("Invalid cursor.") from e
             except InvalidLimit as e:
-                raise UnexpectedError(
+                raise UnexpectedApiError(
                     "Invalid limit. CACHE_REPORTS_WITH_CONTENT_NUM_RESULTS must be a strictly positive integer."
                 ) from e
-        except AdminCustomError as e:
-            return get_json_admin_error_response(e, max_age=max_age)
+        except ApiError as e:
+            return get_json_api_error_response(e, max_age=max_age)
         except Exception as e:
-            return get_json_admin_error_response(UnexpectedError("Unexpected error.", e), max_age=max_age)
+            return get_json_api_error_response(UnexpectedApiError("Unexpected error.", e), max_age=max_age)
 
     return cache_reports_with_content_endpoint

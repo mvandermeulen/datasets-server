@@ -2,7 +2,6 @@
 # Copyright 2022 The HuggingFace Authors.
 
 import logging
-from typing import List
 
 from datasets import Audio, Features, Image
 from fsspec.implementations.http import HTTPFileSystem
@@ -15,9 +14,11 @@ from libcommon.exceptions import (
     TooBigContentError,
     TooManyColumnsError,
 )
-from libcommon.parquet_utils import Indexer
+from libcommon.parquet_utils import Indexer, TooBigRows
 from libcommon.processing_graph import ProcessingGraph, ProcessingStep
+from libcommon.s3_client import S3Client
 from libcommon.storage import StrPath
+from libcommon.storage_options import S3StorageOptions
 from libcommon.utils import JobInfo, Row, RowItem
 from libcommon.viewer_utils.features import get_cell_value, to_features_list
 
@@ -29,25 +30,25 @@ from worker.utils import create_truncated_row_items, get_json_size
 
 def transform_rows(
     dataset: str,
+    revision: str,
     config: str,
     split: str,
-    rows: List[RowItem],
+    rows: list[RowItem],
     features: Features,
-    assets_base_url: str,
-    assets_directory: StrPath,
-) -> List[Row]:
+    storage_options: S3StorageOptions,
+) -> list[Row]:
     return [
         {
             featureName: get_cell_value(
                 dataset=dataset,
+                revision=revision,
                 config=config,
                 split=split,
                 row_idx=row_idx,
                 cell=row["row"][featureName] if featureName in row["row"] else None,
                 featureName=featureName,
                 fieldType=fieldType,
-                assets_base_url=assets_base_url,
-                assets_directory=assets_directory,
+                storage_options=storage_options,
             )
             for (featureName, fieldType) in features.items()
         }
@@ -57,15 +58,15 @@ def transform_rows(
 
 def compute_first_rows_response(
     dataset: str,
+    revision: str,
     config: str,
     split: str,
-    assets_base_url: str,
+    storage_options: S3StorageOptions,
     min_cell_bytes: int,
     rows_max_bytes: int,
     rows_max_number: int,
     rows_min_number: int,
     columns_max_number: int,
-    assets_directory: StrPath,
     indexer: Indexer,
 ) -> SplitFirstRowsResponse:
     logging.info(f"get first-rows for dataset={dataset} config={config} split={split}")
@@ -93,6 +94,7 @@ def compute_first_rows_response(
         "split": split,
         "features": features_list,
         "rows": [],
+        "truncated": False,
     }
 
     surrounding_json_size = get_json_size(response_features_only)
@@ -103,7 +105,11 @@ def compute_first_rows_response(
         )
 
     # get the rows
-    pa_table = rows_index.query(offset=0, length=rows_max_number)
+    try:
+        pa_table = rows_index.query(offset=0, length=rows_max_number)
+        all_fetched = rows_index.parquet_index.num_rows_total <= rows_max_number
+    except TooBigRows as err:
+        raise TooBigContentError(str(err))
     rows = [
         RowItem(
             {
@@ -119,12 +125,12 @@ def compute_first_rows_response(
     try:
         transformed_rows = transform_rows(
             dataset=dataset,
+            revision=revision,
             config=config,
             split=split,
             rows=rows,
             features=features,
-            assets_base_url=assets_base_url,
-            assets_directory=assets_directory,
+            storage_options=storage_options,
         )
     except Exception as err:
         raise RowsPostProcessingError(
@@ -134,7 +140,7 @@ def compute_first_rows_response(
 
     # truncate the rows to fit within the restrictions, and prepare them as RowItems
     columns_to_keep_untruncated = [col for col, feature in features.items() if isinstance(feature, (Image, Audio))]
-    row_items = create_truncated_row_items(
+    row_items, truncated = create_truncated_row_items(
         rows=transformed_rows,
         min_cell_bytes=min_cell_bytes,
         rows_max_bytes=rows_max_bytes - surrounding_json_size,
@@ -144,13 +150,15 @@ def compute_first_rows_response(
 
     response = response_features_only
     response["rows"] = row_items
+    response["truncated"] = (not all_fetched) or truncated
+
     return response
 
 
 class SplitFirstRowsFromParquetJobRunner(SplitJobRunner):
     assets_directory: StrPath
     first_rows_config: FirstRowsConfig
-    indexed: Indexer
+    indexer: Indexer
 
     @staticmethod
     def get_job_type() -> str:
@@ -175,6 +183,7 @@ class SplitFirstRowsFromParquetJobRunner(SplitJobRunner):
         processing_graph: ProcessingGraph,
         assets_directory: StrPath,
         parquet_metadata_directory: StrPath,
+        s3_client: S3Client,
     ) -> None:
         super().__init__(
             job_info=job_info,
@@ -192,16 +201,25 @@ class SplitFirstRowsFromParquetJobRunner(SplitJobRunner):
             httpfs=HTTPFileSystem(headers={"authorization": f"Bearer {self.app_config.common.hf_token}"}),
             unsupported_features=[],
             all_columns_supported_datasets_allow_list="all",
+            max_arrow_data_in_memory=app_config.rows_index.max_arrow_data_in_memory,
+        )
+
+        self.storage_options = S3StorageOptions(
+            assets_base_url=self.assets_base_url,
+            assets_directory=self.assets_directory,
+            overwrite=True,
+            s3_client=s3_client,
+            s3_folder_name=app_config.assets.s3_folder_name,
         )
 
     def compute(self) -> CompleteJobResult:
         return CompleteJobResult(
             compute_first_rows_response(
                 dataset=self.dataset,
+                revision=self.dataset_git_revision,
                 config=self.config,
                 split=self.split,
-                assets_base_url=self.assets_base_url,
-                assets_directory=self.assets_directory,
+                storage_options=self.storage_options,
                 min_cell_bytes=self.first_rows_config.min_cell_bytes,
                 rows_max_bytes=self.first_rows_config.max_bytes,
                 rows_max_number=self.first_rows_config.max_number,

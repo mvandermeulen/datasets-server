@@ -3,8 +3,9 @@
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from http import HTTPStatus
-from typing import List, Mapping, Optional, Tuple, TypedDict
+from typing import Optional, TypedDict
 
 from libapi.authentication import auth_check
 from libapi.exceptions import (
@@ -15,24 +16,20 @@ from libapi.exceptions import (
 from libapi.utils import (
     Endpoint,
     are_valid_parameters,
+    get_cache_entry_from_steps,
     get_json_api_error_response,
     get_json_error_response,
     get_json_ok_response,
-    try_backfill_dataset_then_raise,
 )
 from libcommon.processing_graph import InputType, ProcessingGraph, ProcessingStep
 from libcommon.prometheus import StepProfiler
-from libcommon.simple_cache import (
-    CACHED_RESPONSE_NOT_FOUND,
-    CacheEntry,
-    get_best_response,
-)
 from starlette.requests import Request
 from starlette.responses import Response
+from typing_extensions import override
 
 from api.config import EndpointConfig
 
-StepsByInputType = Mapping[InputType, List[ProcessingStep]]
+StepsByInputType = Mapping[InputType, list[ProcessingStep]]
 
 StepsByInputTypeAndEndpoint = Mapping[str, StepsByInputType]
 
@@ -57,46 +54,9 @@ class EndpointsDefinition:
         }
 
 
-def get_cache_entry_from_steps(
-    processing_steps: List[ProcessingStep],
-    dataset: str,
-    config: Optional[str],
-    split: Optional[str],
-    processing_graph: ProcessingGraph,
-    cache_max_days: int,
-    hf_endpoint: str,
-    hf_token: Optional[str] = None,
-    hf_timeout_seconds: Optional[float] = None,
-) -> CacheEntry:
-    """Gets the cache from the first successful step in the processing steps list.
-    If no successful result is found, it will return the last one even if it's an error,
-    Checks if job is still in progress by each processing step in case of no entry found.
-    Raises:
-        - [`~utils.ResponseNotFoundError`]
-          if no result is found.
-        - [`~utils.ResponseNotReadyError`]
-          if the response is not ready yet.
-
-    Returns: the cached record
-    """
-    kinds = [processing_step.cache_kind for processing_step in processing_steps]
-    best_response = get_best_response(kinds=kinds, dataset=dataset, config=config, split=split)
-    if "error_code" in best_response.response and best_response.response["error_code"] == CACHED_RESPONSE_NOT_FOUND:
-        try_backfill_dataset_then_raise(
-            processing_steps=processing_steps,
-            processing_graph=processing_graph,
-            dataset=dataset,
-            hf_endpoint=hf_endpoint,
-            hf_timeout_seconds=hf_timeout_seconds,
-            hf_token=hf_token,
-            cache_max_days=cache_max_days,
-        )
-    return best_response.response
-
-
 # TODO: remove once full scan is implemented for spawning urls scan
 class OptInOutUrlsCountResponse(TypedDict):
-    urls_columns: List[str]
+    urls_columns: list[str]
     num_opt_in_urls: int
     num_opt_out_urls: int
     num_urls: int
@@ -142,7 +102,7 @@ class InputTypeValidator(ABC):
     @abstractmethod
     def get_useful_parameters(
         self, dataset: Optional[str], config: Optional[str], split: Optional[str]
-    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
         pass
 
     @staticmethod
@@ -159,50 +119,59 @@ class InputTypeValidator(ABC):
 class DatasetInputTypeValidator(InputTypeValidator):
     input_type: InputType = "dataset"
 
+    @override
     def are_parameters_sufficient(self, dataset: Optional[str], config: Optional[str], split: Optional[str]) -> bool:
         return are_valid_parameters([dataset])
 
+    @override
     def get_error_message(self) -> str:
         return "Parameter 'dataset' is required"
 
+    @override
     def get_useful_parameters(
         self, dataset: Optional[str], config: Optional[str], split: Optional[str]
-    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
         return (dataset, None, None)
 
 
 class ConfigInputTypeValidator(InputTypeValidator):
     input_type: InputType = "config"
 
+    @override
     def are_parameters_sufficient(self, dataset: Optional[str], config: Optional[str], split: Optional[str]) -> bool:
         return are_valid_parameters([dataset, config])
 
+    @override
     def get_error_message(self) -> str:
         return "Parameters 'config' and 'dataset' are required"
 
+    @override
     def get_useful_parameters(
         self, dataset: Optional[str], config: Optional[str], split: Optional[str]
-    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
         return (dataset, config, None)
 
 
 class SplitInputTypeValidator(InputTypeValidator):
     input_type: InputType = "split"
 
+    @override
     def are_parameters_sufficient(self, dataset: Optional[str], config: Optional[str], split: Optional[str]) -> bool:
         return are_valid_parameters([dataset, config, split])
 
+    @override
     def get_error_message(self) -> str:
         return "Parameters 'split', 'config' and 'dataset' are required"
 
+    @override
     def get_useful_parameters(
         self, dataset: Optional[str], config: Optional[str], split: Optional[str]
-    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
         return (dataset, config, split)
 
 
-def get_input_type_validators_by_priority(steps_by_input_type: StepsByInputType) -> List[InputTypeValidator]:
-    input_type_order: List[InputType] = ["split", "config", "dataset"]
+def get_input_type_validators_by_priority(steps_by_input_type: StepsByInputType) -> list[InputTypeValidator]:
+    input_type_order: list[InputType] = ["split", "config", "dataset"]
     return [
         InputTypeValidator.from_input_type(input_type)
         for input_type in input_type_order
@@ -211,7 +180,7 @@ def get_input_type_validators_by_priority(steps_by_input_type: StepsByInputType)
 
 
 def get_input_type_validator_by_parameters(
-    validators: List[InputTypeValidator], dataset: Optional[str], config: Optional[str], split: Optional[str]
+    validators: list[InputTypeValidator], dataset: Optional[str], config: Optional[str], split: Optional[str]
 ) -> InputTypeValidator:
     error_message = "No processing steps supported for parameters"
     for validator in validators:
@@ -227,8 +196,9 @@ def create_endpoint(
     processing_graph: ProcessingGraph,
     cache_max_days: int,
     hf_endpoint: str,
+    blocked_datasets: list[str],
     hf_token: Optional[str] = None,
-    hf_jwt_public_keys: Optional[List[str]] = None,
+    hf_jwt_public_keys: Optional[list[str]] = None,
     hf_jwt_algorithm: Optional[str] = None,
     external_auth_url: Optional[str] = None,
     hf_timeout_seconds: Optional[float] = None,
@@ -270,7 +240,7 @@ def create_endpoint(
 
                 # if auth_check fails, it will raise an exception that will be caught below
                 with StepProfiler(method="processing_step_endpoint", step="check authentication", context=context):
-                    auth_check(
+                    await auth_check(
                         dataset,
                         external_auth_url=external_auth_url,
                         request=request,
@@ -298,6 +268,7 @@ def create_endpoint(
                         processing_graph=processing_graph,
                         hf_endpoint=hf_endpoint,
                         hf_token=hf_token,
+                        blocked_datasets=blocked_datasets,
                         hf_timeout_seconds=hf_timeout_seconds,
                         cache_max_days=cache_max_days,
                     )

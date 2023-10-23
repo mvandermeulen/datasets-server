@@ -2,9 +2,10 @@
 # Copyright 2022 The HuggingFace Authors.
 
 import io
+from collections.abc import Callable, Mapping
 from http import HTTPStatus
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Optional
 from unittest.mock import patch
 
 import pyarrow as pa
@@ -13,6 +14,7 @@ import pytest
 from datasets import Dataset, Features, Value
 from fsspec.implementations.http import HTTPFile, HTTPFileSystem
 from huggingface_hub import hf_hub_url
+from libcommon.config import ProcessingGraphConfig
 from libcommon.exceptions import PreviousStepFormatError
 from libcommon.parquet_utils import ParquetIndexWithMetadata
 from libcommon.processing_graph import ProcessingGraph
@@ -31,6 +33,7 @@ from worker.job_runners.config.parquet_metadata import ConfigParquetMetadataJobR
 
 from ...constants import CI_USER_TOKEN
 from ...fixtures.hub import hf_api
+from ..utils import REVISION_NAME
 
 
 @pytest.fixture(autouse=True)
@@ -58,21 +61,32 @@ def get_job_runner(
     ) -> ConfigParquetMetadataJobRunner:
         processing_step_name = ConfigParquetMetadataJobRunner.get_job_type()
         processing_graph = ProcessingGraph(
-            {
-                "dataset-level": {"input_type": "dataset"},
-                processing_step_name: {
-                    "input_type": "dataset",
-                    "job_runner_version": ConfigParquetMetadataJobRunner.get_job_runner_version(),
-                    "triggered_by": "dataset-level",
-                },
-            }
+            ProcessingGraphConfig(
+                {
+                    "dataset-level": {"input_type": "dataset"},
+                    processing_step_name: {
+                        "input_type": "dataset",
+                        "job_runner_version": ConfigParquetMetadataJobRunner.get_job_runner_version(),
+                        "triggered_by": "dataset-level",
+                    },
+                }
+            )
         )
+
+        upsert_response(
+            kind="dataset-config-names",
+            dataset=dataset,
+            dataset_git_revision=REVISION_NAME,
+            content={"config_names": [{"dataset": dataset, "config": config}]},
+            http_status=HTTPStatus.OK,
+        )
+
         return ConfigParquetMetadataJobRunner(
             job_info={
                 "type": ConfigParquetMetadataJobRunner.get_job_type(),
                 "params": {
                     "dataset": dataset,
-                    "revision": "revision",
+                    "revision": REVISION_NAME,
                     "config": config,
                     "split": None,
                 },
@@ -225,6 +239,7 @@ def test_compute(
     upsert_response(
         kind="config-parquet",
         dataset=dataset,
+        dataset_git_revision=REVISION_NAME,
         config=config,
         content=upstream_content,
         http_status=upstream_status,
@@ -318,6 +333,7 @@ def test_ParquetIndexWithMetadata_query(
         num_bytes=[num_bytes],
         httpfs=httpfs,
         hf_token=CI_USER_TOKEN,
+        max_arrow_data_in_memory=999999999,
     )
     with patch("libcommon.parquet_utils.HTTPFile", AuthenticatedHTTPFile):
         out = index.query(offset=0, length=2).to_pydict()

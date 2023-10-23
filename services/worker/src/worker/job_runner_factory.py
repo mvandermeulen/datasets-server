@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from libcommon.processing_graph import ProcessingGraph
+from libcommon.s3_client import S3Client
 from libcommon.storage import StrPath
 from libcommon.utils import JobInfo
 
@@ -27,6 +28,7 @@ from worker.job_runners.config.split_names_from_streaming import (
     ConfigSplitNamesFromStreamingJobRunner,
 )
 from worker.job_runners.dataset.config_names import DatasetConfigNamesJobRunner
+from worker.job_runners.dataset.hub_cache import DatasetHubCacheJobRunner
 from worker.job_runners.dataset.info import DatasetInfoJobRunner
 from worker.job_runners.dataset.is_valid import DatasetIsValidJobRunner
 from worker.job_runners.dataset.opt_in_out_urls_count import (
@@ -81,6 +83,7 @@ class JobRunnerFactory(BaseJobRunnerFactory):
     parquet_metadata_directory: StrPath
     duckdb_index_cache_directory: StrPath
     statistics_cache_directory: StrPath
+    s3_client: S3Client
 
     def _create_job_runner(self, job_info: JobInfo) -> JobRunner:
         job_type = job_info["type"]
@@ -112,6 +115,7 @@ class JobRunnerFactory(BaseJobRunnerFactory):
                 processing_step=processing_step,
                 hf_datasets_cache=self.hf_datasets_cache,
                 assets_directory=self.assets_directory,
+                s3_client=self.s3_client,
             )
         if job_type == ConfigParquetAndInfoJobRunner.get_job_type():
             return ConfigParquetAndInfoJobRunner(
@@ -183,6 +187,7 @@ class JobRunnerFactory(BaseJobRunnerFactory):
                 processing_graph=self.processing_graph,
                 assets_directory=self.assets_directory,
                 parquet_metadata_directory=self.parquet_metadata_directory,
+                s3_client=self.s3_client,
             )
         if job_type == SplitIsValidJobRunner.get_job_type():
             return SplitIsValidJobRunner(
@@ -251,6 +256,13 @@ class JobRunnerFactory(BaseJobRunnerFactory):
                 duckdb_index_cache_directory=self.duckdb_index_cache_directory,
             )
 
+        if job_type == DatasetHubCacheJobRunner.get_job_type():
+            return DatasetHubCacheJobRunner(
+                job_info=job_info,
+                app_config=self.app_config,
+                processing_step=processing_step,
+            )
+
         supported_job_types = [
             DatasetConfigNamesJobRunner.get_job_type(),
             ConfigSplitNamesFromStreamingJobRunner.get_job_type(),
@@ -274,5 +286,6 @@ class JobRunnerFactory(BaseJobRunnerFactory):
             DatasetOptInOutUrlsCountJobRunner.get_job_type(),
             SplitDuckDbIndexJobRunner.get_job_type(),
             SplitDescriptiveStatisticsJobRunner.get_job_type(),
+            DatasetHubCacheJobRunner.get_job_type(),
         ]
         raise ValueError(f"Unsupported job type: '{job_type}'. The supported job types are: {supported_job_types}")

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2022 The HuggingFace Authors.
 
-from typing import Iterator
+from collections.abc import Iterator
 
 from libcommon.processing_graph import ProcessingGraph
 from libcommon.queue import _clean_queue_database
@@ -39,7 +39,7 @@ def app_config(monkeypatch_session: MonkeyPatch) -> AppConfig:
 
 @fixture(scope="session")
 def processing_graph(app_config: AppConfig) -> ProcessingGraph:
-    return ProcessingGraph(app_config.processing_graph.specification)
+    return ProcessingGraph(app_config.processing_graph)
 
 
 @fixture(scope="session")
@@ -59,3 +59,8 @@ def queue_mongo_resource(app_config: AppConfig) -> Iterator[QueueMongoResource]:
     with QueueMongoResource(database=app_config.queue.mongo_database, host=app_config.queue.mongo_url) as resource:
         yield resource
         _clean_queue_database()
+
+
+@fixture
+def anyio_backend() -> str:
+    return "asyncio"

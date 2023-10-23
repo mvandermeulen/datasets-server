@@ -16,7 +16,8 @@ ENV PYTHONFAULTHANDLER=1 \
 
 # System deps:
 RUN apt-get update \
-    && apt-get install -y build-essential make \
+    && apt-get install -y build-essential unzip wget \
+    libicu-dev ffmpeg libavcodec-extra libsndfile1 llvm pkg-config \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install -U pip
 RUN pip install "poetry==$POETRY_VERSION"
@@ -24,6 +25,8 @@ RUN pip install "poetry==$POETRY_VERSION"
 WORKDIR /src
 COPY libs/libcommon/poetry.lock ./libs/libcommon/poetry.lock
 COPY libs/libcommon/pyproject.toml ./libs/libcommon/pyproject.toml
+COPY libs/libapi/poetry.lock ./libs/libapi/poetry.lock
+COPY libs/libapi/pyproject.toml ./libs/libapi/pyproject.toml
 COPY services/admin/poetry.lock ./services/admin/poetry.lock
 COPY services/admin/pyproject.toml ./services/admin/pyproject.toml
 
@@ -31,6 +34,9 @@ COPY services/admin/pyproject.toml ./services/admin/pyproject.toml
 # Initialize an empty libcommon
 # Mapping a volume to ./libs/libcommon/src is required when running this image.
 RUN mkdir ./libs/libcommon/src && mkdir ./libs/libcommon/src/libcommon && touch ./libs/libcommon/src/libcommon/__init__.py
+# Initialize an empty libapi
+# Mapping a volume to ./libs/libapi/src is required when running this image.
+RUN mkdir ./libs/libapi/src && mkdir ./libs/libapi/src/libapi && touch ./libs/libapi/src/libapi/__init__.py
 
 # Install dependencies
 WORKDIR /src/services/admin/

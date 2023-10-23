@@ -10,6 +10,7 @@ from libapi.utils import EXPOSED_HEADERS
 from libcommon.log import init_logging
 from libcommon.processing_graph import ProcessingGraph
 from libcommon.resources import CacheMongoResource, QueueMongoResource, Resource
+from libcommon.s3_client import S3Client
 from libcommon.storage import exists, init_cached_assets_dir, init_parquet_metadata_dir
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -37,7 +38,7 @@ def create_app_with_config(app_config: AppConfig) -> Starlette:
     if not exists(parquet_metadata_directory):
         raise RuntimeError("The parquet metadata storage directory could not be accessed. Exiting.")
 
-    processing_graph = ProcessingGraph(app_config.processing_graph.specification)
+    processing_graph = ProcessingGraph(app_config.processing_graph)
     hf_jwt_public_keys = get_jwt_public_keys(
         algorithm_name=app_config.api.hf_jwt_algorithm,
         public_key_url=app_config.api.hf_jwt_public_key_url,
@@ -60,6 +61,12 @@ def create_app_with_config(app_config: AppConfig) -> Starlette:
 
     cache_resource = CacheMongoResource(database=app_config.cache.mongo_database, host=app_config.cache.mongo_url)
     queue_resource = QueueMongoResource(database=app_config.queue.mongo_database, host=app_config.queue.mongo_url)
+    s3_client = S3Client(
+        aws_access_key_id=app_config.s3.access_key_id,
+        aws_secret_access_key=app_config.s3.secret_access_key,
+        region_name=app_config.s3.region,
+        bucket_name=app_config.s3.bucket,
+    )
     resources: list[Resource] = [cache_resource, queue_resource]
     if not cache_resource.is_available():
         raise RuntimeError("The connection to the cache database could not be established. Exiting.")
@@ -76,9 +83,13 @@ def create_app_with_config(app_config: AppConfig) -> Starlette:
                 processing_graph=processing_graph,
                 cached_assets_base_url=app_config.cached_assets.base_url,
                 cached_assets_directory=cached_assets_directory,
+                cached_assets_s3_folder_name=app_config.cached_assets.s3_folder_name,
+                s3_client=s3_client,
                 parquet_metadata_directory=parquet_metadata_directory,
+                max_arrow_data_in_memory=app_config.rows_index.max_arrow_data_in_memory,
                 hf_endpoint=app_config.common.hf_endpoint,
                 hf_token=app_config.common.hf_token,
+                blocked_datasets=app_config.common.blocked_datasets,
                 hf_jwt_public_keys=hf_jwt_public_keys,
                 hf_jwt_algorithm=app_config.api.hf_jwt_algorithm,
                 external_auth_url=app_config.api.external_auth_url,

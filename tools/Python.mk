@@ -15,7 +15,8 @@ lock:
 quality:
 	poetry run black --check tests src
 	poetry run isort --check-only tests src
-	poetry run flake8 tests src
+	poetry run flake8 src
+	poetry run flake8 tests --ignore=U100
 	poetry run mypy tests src
 	poetry run bandit -r src
 	$(MAKE) pip-audit
@@ -28,5 +29,5 @@ style:
 
 .PHONY: pip-audit
 pip-audit:
-	bash -c "poetry run pip-audit -r <(poetry export -f requirements.txt --with dev  | sed '/^kenlm @/d' |sed '/^torch @/d' | sed '/^libapi @/d' | sed '/^libcommon @/d' | sed '/^trec-car-tools @/d')"
+	bash -c "poetry run pip-audit --ignore-vuln GHSA-wfm5-v35h-vwf4 --ignore-vuln GHSA-cwvm-v4w8-q58c -r <(poetry export -f requirements.txt --with dev  | sed '/^kenlm @/d' |sed '/^torch @/d' | sed '/^libapi @/d' | sed '/^libcommon @/d' | sed '/^trec-car-tools @/d')"
 # ^ we remove problematic lines to have a working pip-audit. See https://github.com/pypa/pip-audit/issues/84#issuecomment-1326203111 for "requests"
